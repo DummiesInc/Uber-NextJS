@@ -1,5 +1,10 @@
 import L from 'leaflet';
-import { cellToBoundary, latLngToCell } from 'h3-js';
+import {
+  cellToBoundary,
+  cellsToMultiPolygon,
+  gridDisk,
+  latLngToCell
+} from 'h3-js';
 import {
   DESTINATION,
   H3_RES,
@@ -10,10 +15,10 @@ import {
 import type { EventBus } from '@/lib/sim/events';
 import type { Driver } from '@/lib/sim/driver';
 import { SERVICE_CELLS, SERVICE_SET } from '@/lib/sim/grid';
+import { HEAT_CELLS, toHeatCell } from '@/lib/sim/heat';
 import type { World } from '@/lib/sim/world';
 import type { LatLng, Route } from '@/lib/sim/types';
 import {
-  BASEMAPS,
   basemapLayer,
   saveBasemap,
   savedBasemap,
@@ -52,6 +57,19 @@ export interface DriverPopupTarget {
   popup: L.Popup;
 }
 
+export enum HeatTool {
+  None = 'none',
+  Paint = 'paint',
+  Erase = 'erase'
+}
+
+/** The active heat-map editing tool; `rings` is the brush radius (1–3). */
+export interface HeatBrush {
+  tool: HeatTool;
+  rings: number;
+  strength: number;
+}
+
 export interface MapViewCallbacks {
   onCellHover: (info: CellHoverInfo | null) => void;
   onDriverPopupOpen: (target: DriverPopupTarget) => void;
@@ -70,6 +88,8 @@ const HEX_CLASS = {
     'ring-hit fill-surface-success [fill-opacity:.35] stroke-stroke-success stroke-2',
   ringOld:
     'ring-old fill-surface-accent [fill-opacity:.1] stroke-stroke-accent [stroke-opacity:.4] stroke-1',
+  brush:
+    'brush-hex fill-none stroke-gray-90 stroke-2 [stroke-dasharray:4_4] in-[.theme-dark]:stroke-gray-5',
   hover: 'hover-hex fill-blue-40 [fill-opacity:.12] stroke-blue-60 stroke-2',
   route:
     'route-hex fill-blue-50 [fill-opacity:.1] stroke-blue-60 [stroke-opacity:.5] stroke-1 in-[.theme-dark]:fill-blue-40 in-[.theme-dark]:stroke-blue-40'
@@ -84,13 +104,68 @@ const LINE_CLASS = {
     'offer-line stroke-yellow-40 stroke-3 [stroke-dasharray:6_6] animate-dash'
 };
 
-/** Canvas strokes can't read CSS variables, so resolve a gray token to hsl(). */
-const grayToken = (step: number): string =>
-  `hsl(${getComputedStyle(document.documentElement).getPropertyValue(`--gray-${step}`).trim()})`;
+/** Canvas can't read CSS variables, so resolve a colour token to hsl(). */
+const colorToken = (name: string): string =>
+  `hsl(${getComputedStyle(document.documentElement).getPropertyValue(`--${name}`).trim()})`;
+
+/**
+ * Demand ramp, light yellow (low) through ochre to deep red (high); Legend
+ * mirrors it. It skips the orange-30–60 band so on-trip (orange-50) cars only
+ * ever sit on yellow or on a much darker red.
+ */
+const HEAT_RAMP_TOKENS: string[] = [
+  'yellow-30',
+  'yellow-50',
+  'yellow-60',
+  'orange-70',
+  'orange-90'
+];
+let heatRampColors: string[] = [];
+
+/**
+ * fillOpacity = base + range * sqrt(value). The square root lifts the faint
+ * background (0.03–0.12) and light dabs so they read on Positron; dark
+ * basemaps make the same colours glow, so they start lower.
+ */
+const HEAT_OPACITY = {
+  light: { base: 0.28, range: 0.47 },
+  dark: { base: 0.15, range: 0.6 }
+};
+
+/** Canvas fill for a demand value in 0–1; zero is fully transparent. */
+function heatStyle(value: number, isDark: boolean): L.PathOptions {
+  if (heatRampColors.length === 0) {
+    heatRampColors = HEAT_RAMP_TOKENS.map(colorToken);
+  }
+  if (value <= 0) return { fillOpacity: 0 };
+  const step: number = Math.min(
+    heatRampColors.length - 1,
+    Math.floor(value * heatRampColors.length)
+  );
+  const { base, range } = isDark ? HEAT_OPACITY.dark : HEAT_OPACITY.light;
+  return {
+    fillColor: heatRampColors[step],
+    fillOpacity: base + range * Math.sqrt(value)
+  };
+}
 
 export class MapView {
   readonly map: L.Map;
-  private renderer = L.canvas({ padding: 0.3 });
+  private renderer: L.Canvas;
+  private heatRenderer: L.Canvas;
+  private heatPolys = new Map<string, L.Polygon>();
+  /** Mirrors `.theme-dark` on the container; heat opacity depends on it. */
+  private isDarkBasemap: boolean = false;
+  private heatBrush: HeatBrush = {
+    tool: HeatTool.None,
+    rings: 1,
+    strength: 0.2
+  };
+  private brushHex: L.Polygon | null = null;
+  private brushCell: string | null = null;
+  /** Last cell painted in the current stroke, or null when not stroking. */
+  private strokeCell: string | null = null;
+  private isStroking: boolean = false;
   private cars = new Map<number, CarView>();
   private ringLayer = L.layerGroup();
   private routeLayer = L.layerGroup();
@@ -104,6 +179,8 @@ export class MapView {
   private pickup: LatLng | null = null;
   private currentRing: L.Polygon[] = [];
   private gridPolys: L.Polygon[] = [];
+  private basemap: Basemap | null = null;
+  private basemapLayer: L.Layer | null = null;
   private hoveredCell: CellHoverInfo | null = null;
   private timeouts = new Set<ReturnType<typeof setTimeout>>();
   private unsubscribers: (() => void)[] = [];
@@ -114,12 +191,26 @@ export class MapView {
     bus: EventBus,
     private callbacks: MapViewCallbacks
   ) {
-    this.map = L.map(el, { zoomControl: true, preferCanvas: false }).setView(
+    this.map = L.map(el, { zoomControl: false, preferCanvas: false }).setView(
       ll(MAP_CENTER),
       MAP_ZOOM
     );
+    // Top-right keeps the left edge free for the control panel drawer.
+    L.control.zoom({ position: 'topright' }).addTo(this.map);
+    // Panes: basemap (200) < grid (300) < heat (350) < overlays (400) < cars.
+    // Unlayered leaflet.css outranks Tailwind's z-* utilities, so set it here.
+    this.map.createPane('grid').style.zIndex = '300';
+    this.map.createPane('heat').style.zIndex = '350';
+    this.renderer = L.canvas({ padding: 0.3, pane: 'grid' });
+    this.heatRenderer = L.canvas({ padding: 0.3, pane: 'heat' });
     this.drawGrid();
-    this.setupBasemaps();
+    this.drawHeat();
+    this.unsubscribers.push(
+      world.heat.onChange((changed: string[] | null) =>
+        this.restyleHeat(changed)
+      )
+    );
+    this.setBasemap(savedBasemap());
     this.ringLayer.addTo(this.map);
     this.routeLayer.addTo(this.map);
     this.pickupLayer.addTo(this.map);
@@ -137,10 +228,24 @@ export class MapView {
 
     this.syncFleet();
     this.unsubscribers.push(world.onFleetChange(() => this.syncFleet()));
-    this.map.on('mousemove', (e: L.LeafletMouseEvent) =>
-      this.showCellInfo(e.latlng)
-    );
+    this.map.on('mousemove', (e: L.LeafletMouseEvent) => {
+      if (this.heatBrush.tool === HeatTool.None) {
+        this.showCellInfo(e.latlng);
+        return;
+      }
+      this.showBrush(e.latlng);
+      if (this.isStroking) this.paintStroke(e.latlng);
+    });
+    this.map.on('mousedown', (e: L.LeafletMouseEvent) => {
+      if (this.heatBrush.tool === HeatTool.None) return;
+      this.isStroking = true;
+      this.strokeCell = null;
+      this.paintStroke(e.latlng);
+    });
+    this.map.on('mouseup', () => this.endStroke());
     this.map.on('mouseout', () => {
+      this.endStroke();
+      this.hideBrush();
       this.hoverHex?.remove();
       this.reportCellHover(null);
     });
@@ -247,8 +352,103 @@ export class MapView {
     this.unsubscribers = [];
     this.timeouts.forEach((id) => clearTimeout(id));
     this.timeouts.clear();
+    this.setHeatBrush({ ...this.heatBrush, tool: HeatTool.None });
     this.map.remove();
     this.cars.clear();
+  }
+
+  setGridVisible(isVisible: boolean): void {
+    this.map.getPane('grid')?.classList.toggle('hidden', !isVisible);
+  }
+
+  setHeatVisible(isVisible: boolean): void {
+    this.map.getPane('heat')?.classList.toggle('hidden', !isVisible);
+  }
+
+  /** Switch the heat editing tool; any active tool disables map dragging. */
+  setHeatBrush(brush: HeatBrush): void {
+    const wasPainting: boolean = this.heatBrush.tool !== HeatTool.None;
+    const isPainting: boolean = brush.tool !== HeatTool.None;
+    const ringsChanged: boolean = brush.rings !== this.heatBrush.rings;
+    this.heatBrush = { ...brush };
+    if (isPainting && !wasPainting) {
+      this.map.dragging.disable();
+      this.map.doubleClickZoom.disable();
+      this.map.getContainer().classList.add('leaflet-crosshair');
+      this.hoverHex?.remove();
+      this.reportCellHover(null);
+    } else if (!isPainting && wasPainting) {
+      this.map.dragging.enable();
+      this.map.doubleClickZoom.enable();
+      this.map.getContainer().classList.remove('leaflet-crosshair');
+      this.endStroke();
+      this.hideBrush();
+    } else if (isPainting && ringsChanged && this.brushCell) {
+      this.drawBrush(this.brushCell);
+    }
+  }
+
+  private drawHeat(): void {
+    for (const cell of HEAT_CELLS) {
+      this.heatPolys.set(
+        cell,
+        L.polygon(hexLatLngs(cell), {
+          renderer: this.heatRenderer,
+          stroke: false,
+          interactive: false,
+          ...heatStyle(this.world.heat.get(cell), this.isDarkBasemap)
+        }).addTo(this.map)
+      );
+    }
+  }
+
+  private restyleHeat(changed: string[] | null): void {
+    for (const cell of changed ?? HEAT_CELLS) {
+      this.heatPolys
+        .get(cell)
+        ?.setStyle(heatStyle(this.world.heat.get(cell), this.isDarkBasemap));
+    }
+  }
+
+  /** Paints once per res-9 cell entered, so a still cursor doesn't pile up. */
+  private paintStroke(p: L.LatLng): void {
+    const cell: string = toHeatCell(p);
+    if (cell === this.strokeCell) return;
+    this.strokeCell = cell;
+    const { tool, rings, strength } = this.heatBrush;
+    this.world.heat.paint(p, rings, strength, tool === HeatTool.Erase);
+  }
+
+  private endStroke(): void {
+    this.isStroking = false;
+    this.strokeCell = null;
+  }
+
+  private showBrush(p: L.LatLng): void {
+    const cell: string = toHeatCell(p);
+    if (cell === this.brushCell && this.brushHex) return;
+    this.drawBrush(cell);
+  }
+
+  private drawBrush(cell: string): void {
+    this.brushCell = cell;
+    const outline = cellsToMultiPolygon(
+      gridDisk(cell, this.heatBrush.rings)
+    ) as L.LatLngTuple[][][];
+    if (!this.brushHex) {
+      this.brushHex = L.polygon(outline, {
+        className: HEX_CLASS.brush,
+        interactive: false
+      });
+    } else {
+      this.brushHex.setLatLngs(outline);
+    }
+    this.brushHex.addTo(this.map);
+  }
+
+  private hideBrush(): void {
+    this.brushHex?.remove();
+    this.brushCell = null;
   }
 
   private later(fn: () => void, ms: number): void {
@@ -321,32 +521,20 @@ export class MapView {
     }
   }
 
-  private setupBasemaps(): void {
-    const layers = new Map(BASEMAPS.map((b) => [b, basemapLayer(b)]));
-    const apply = (b: Basemap) => {
-      this.map.getContainer().classList.toggle('theme-dark', b.dark);
-      const style = b.dark
-        ? { color: grayToken(30), opacity: 0.22, weight: 0.6 }
-        : { color: grayToken(70), opacity: 0.4, weight: 0.8 };
-      for (const p of this.gridPolys) p.setStyle(style);
-    };
-    const initial = savedBasemap();
-    layers.get(initial)!.addTo(this.map);
-    apply(initial);
-    L.control
-      .layers(
-        Object.fromEntries(BASEMAPS.map((b) => [b.name, layers.get(b)!])),
-        undefined,
-        { position: 'topright' }
-      )
-      .addTo(this.map)
-      .getContainer()
-      ?.classList.add('text-fluid-s');
-    this.map.on('baselayerchange', (e: L.LayersControlEvent) => {
-      const b = BASEMAPS.find((x) => x.name === e.name)!;
-      apply(b);
-      saveBasemap(b);
-    });
+  /** Swap the tile layer and restyle the grid and heat for its theme. */
+  setBasemap(basemap: Basemap): void {
+    if (basemap === this.basemap) return;
+    this.basemapLayer?.remove();
+    this.basemap = basemap;
+    this.basemapLayer = basemapLayer(basemap).addTo(this.map);
+    this.map.getContainer().classList.toggle('theme-dark', basemap.dark);
+    const gridStyle: L.PathOptions = basemap.dark
+      ? { color: colorToken('gray-30'), opacity: 0.22, weight: 0.6 }
+      : { color: colorToken('gray-70'), opacity: 0.4, weight: 0.8 };
+    for (const p of this.gridPolys) p.setStyle(gridStyle);
+    this.isDarkBasemap = basemap.dark;
+    this.restyleHeat(null);
+    saveBasemap(basemap);
   }
 
   private drawTrip(route: Route, cells: string[]): void {

@@ -11,11 +11,28 @@ import {
   useState,
   type ReactNode
 } from 'react';
+import { z } from 'zod';
 import { App } from '@/lib/sim/app';
 import { EventBus, type SimEvent } from '@/lib/sim/events';
 import { World } from '@/lib/sim/world';
 
 type FrameCallback = (now: number) => void;
+
+const HEAT_STORAGE_KEY: string = 'mini-uber.heat.v1';
+const HEAT_SAVE_DEBOUNCE_MS: number = 500;
+const savedHeatSchema = z.record(z.string(), z.number());
+
+/** Replaces the random demand map with the saved one, if there is one. */
+function loadSavedHeat(world: World): void {
+  try {
+    const raw: string | null = localStorage.getItem(HEAT_STORAGE_KEY);
+    if (raw === null) return;
+    const parsed = savedHeatSchema.safeParse(JSON.parse(raw));
+    if (parsed.success) world.heat.load(parsed.data);
+  } catch {
+    // Storage blocked or corrupt: keep the random map.
+  }
+}
 
 interface SimulationEngine {
   bus: EventBus;
@@ -45,6 +62,7 @@ export default function SimulationProvider({
   const [engine] = useState<SimulationEngine>(() => {
     const bus: EventBus = new EventBus();
     const world: World = new World();
+    loadSavedHeat(world);
     return { bus, world, app: new App(world, bus) };
   });
   const frameCallbacksRef = useRef<Set<FrameCallback>>(new Set());
@@ -65,6 +83,31 @@ export default function SimulationProvider({
       rafId = requestAnimationFrame(loop);
     });
     return () => cancelAnimationFrame(rafId);
+  }, [engine]);
+
+  // Save the demand map shortly after each edit; flush a pending save on unmount.
+  useEffect(() => {
+    const { heat } = engine.world;
+    let saveTimeoutId: ReturnType<typeof setTimeout> | null = null;
+    const saveHeat = () => {
+      saveTimeoutId = null;
+      try {
+        localStorage.setItem(HEAT_STORAGE_KEY, JSON.stringify(heat.toJSON()));
+      } catch {
+        // Storage full or blocked: painting still works, it just won't persist.
+      }
+    };
+    const unsubscribe = heat.onChange(() => {
+      if (saveTimeoutId !== null) clearTimeout(saveTimeoutId);
+      saveTimeoutId = setTimeout(saveHeat, HEAT_SAVE_DEBOUNCE_MS);
+    });
+    return () => {
+      unsubscribe();
+      if (saveTimeoutId !== null) {
+        clearTimeout(saveTimeoutId);
+        saveHeat();
+      }
+    };
   }, [engine]);
 
   useEffect(() => {

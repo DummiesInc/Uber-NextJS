@@ -2,6 +2,8 @@
 @import 'tw-animate-css';
 
 @custom-variant dark (&:is(.dark *));
+/* Map overlays while the control panel drawer (#control-panel) is open. */
+@custom-variant panel-open (&:is(.map-wrap:has(> #control-panel:not([hidden])) *));
 
 :root {
   /* ----------------- COLORS ----------------- */
@@ -459,6 +461,7 @@ Tailwind v4 reads the @theme block and automatically exposes utilities for these
   --animate-enter: enter 0.3s;
   --animate-bob: bob 1.4s ease-in-out infinite;
   --animate-dash: dash 1s linear infinite;
+  --animate-slide-in: slide-in 0.2s ease-out;
 }
 
 @keyframes progress-stripes {
@@ -506,6 +509,16 @@ Tailwind v4 reads the @theme block and automatically exposes utilities for these
   }
   50% {
     transform: translateY(-4px);
+  }
+}
+@keyframes slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(-100%);
+  }
+  to {
+    opacity: 1;
+    transform: none;
   }
 }
 @keyframes dash {

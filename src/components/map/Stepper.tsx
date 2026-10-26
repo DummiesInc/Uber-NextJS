@@ -42,16 +42,19 @@ export default function Stepper() {
 
   return (
     <If condition={activeStep >= 0}>
+      {/* Leaves the top-right zoom control (fixed-10xl) clear and wraps when
+          the map is narrower than the steps. Slides past the open control
+          panel (w-64 = 16rem) from sm up; on narrower maps it is covered. */}
       <ol
         id="stepper"
-        className="stepper absolute top-fixed-xs left-14 z-[600] flex gap-1 rounded-full bg-gray-90/90 p-1.5 shadow-lg"
+        className="stepper absolute top-fixed-xs left-fixed-xs z-[600] flex max-w-[calc(100%-var(--spacing-fixed-xs)-var(--spacing-fixed-10xl))] gap-1 flex-wrap rounded-fluid-s bg-gray-90/90 p-1.5 shadow-lg transition-transform sm:panel-open:max-w-[calc(100%-16rem-var(--spacing-fixed-xs)-var(--spacing-fixed-10xl))] sm:panel-open:translate-x-64"
       >
         {RIDE_STEPS.map((label: string, index: number) => (
           <li
             key={label}
             data-i={index}
             className={cn(
-              'flex items-center gap-1.5 rounded-full px-fixed-2xs py-1 text-fluid-xs leading-none text-gray-30',
+              'flex shrink-0 items-center gap-1.5 rounded-full px-fixed-2xs py-1 text-fluid-xs leading-none text-gray-30',
               index < activeStep && 'done text-gray-10',
               index === activeStep &&
                 'active bg-surface-primary font-semibold text-fg-primary'

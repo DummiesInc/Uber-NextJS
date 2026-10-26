@@ -10,6 +10,13 @@ import {
 } from '@/lib/sim/routing/roads';
 import type { BrainKind, Category, DriverState, LatLng } from '@/lib/sim/types';
 
+/** Where an idle driver should roam next: a road node and its heat cell. */
+export interface RoamTarget {
+  node: number;
+  cell: string;
+}
+export type RoamPicker = (driver: Driver) => RoamTarget | null;
+
 const pick = <T>(xs: T[]) => xs[Math.floor(Math.random() * xs.length)];
 
 export class Driver {
@@ -28,6 +35,8 @@ export class Driver {
   private onArrive: (() => void) | null = null;
   /** Road node the current roam ends at (null while on an OSRM trip). */
   private roadNode: number | null = null;
+  /** Heat cell the current roam is heading for (null when roaming at random). */
+  roamCell: string | null = null;
 
   readonly car: string;
   readonly rating: number;
@@ -68,6 +77,7 @@ export class Driver {
     this.startedAt = simNow;
     this.onArrive = onArrive ?? null;
     this.roadNode = null;
+    this.roamCell = null;
     return this.follower;
   }
 
@@ -80,9 +90,11 @@ export class Driver {
   }
 
   /** Advance along the current path; idle/offered drivers roam when they run out. */
-  step(simNow: number): void {
+  step(simNow: number, pickRoam?: RoamPicker): void {
     if (!this.follower) {
-      if (this.state === 'idle' || this.state === 'offered') this.roam(simNow);
+      if (this.state === 'idle' || this.state === 'offered') {
+        this.roam(simNow, pickRoam);
+      }
       return;
     }
     const { pos, heading, done } = this.follower.at(simNow - this.startedAt);
@@ -101,11 +113,25 @@ export class Driver {
     this.follower = null;
     this.onArrive = null;
     this.roadNode = null;
+    this.roamCell = null;
   }
 
-  /** Drive to a random spot a few hexes away, along real roads. */
-  private roam(simNow: number): void {
+  /**
+   * Drive toward the spot `pickRoam` chooses, or to a random spot a few hexes
+   * away when it has none, along real roads.
+   */
+  private roam(simNow: number, pickRoam?: RoamPicker): void {
     const from = this.roadNode ?? nearestNode(this.pos);
+    const target = pickRoam?.(this);
+    if (target && target.node !== from) {
+      const route = roadRoute(from, target.node);
+      if (route && route.points.length >= 2) {
+        this.follow(route.points, route.durationS, simNow);
+        this.roadNode = target.node;
+        this.roamCell = target.cell;
+        return;
+      }
+    }
     for (let tries = 0; tries < 4; tries++) {
       const to = randomNodeNear(this.pos, 5);
       const route = to === from ? null : roadRoute(from, to);

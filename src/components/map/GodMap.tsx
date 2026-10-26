@@ -18,16 +18,19 @@ import {
 import CellInfo from '@/components/map/CellInfo';
 import DriverPopup from '@/components/map/DriverPopup';
 import { useSimulation } from '@/components/providers/SimulationProvider';
+import { useControls } from '@/components/providers/ControlsProvider';
 
 /** The god-view Leaflet map; Leaflet owns the map DOM, React owns overlays. */
 export default function GodMap() {
   const { world, bus, llmEnabled, registerFrame } = useSimulation();
+  const { isGridVisible, isHeatVisible, basemap, heatBrush } = useControls();
   const mapElRef = useRef<HTMLDivElement>(null);
   const nextPersonaIndexRef = useRef<number>(0);
   const [cellHover, setCellHover] = useState<CellHoverInfo | null>(null);
   const [driverPopup, setDriverPopup] = useState<DriverPopupTarget | null>(
     null
   );
+  const [mapView, setMapView] = useState<MapView | null>(null);
   const [popupRevision, setPopupRevision] = useState<number>(0);
 
   useEffect(() => {
@@ -40,11 +43,30 @@ export default function GodMap() {
         setDriverPopup((open) => (open?.driver === driver ? null : open))
     });
     const unregisterFrame = registerFrame((now: number) => mapView.frame(now));
+    setMapView(mapView);
     return () => {
       unregisterFrame();
+      setMapView(null);
       mapView.destroy();
     };
   }, [world, bus, registerFrame]);
+
+  // MapView is recreated on remount, so re-apply the map settings to it.
+  useEffect(() => {
+    mapView?.setGridVisible(isGridVisible);
+  }, [mapView, isGridVisible]);
+
+  useEffect(() => {
+    mapView?.setHeatVisible(isHeatVisible);
+  }, [mapView, isHeatVisible]);
+
+  useEffect(() => {
+    mapView?.setBasemap(basemap);
+  }, [mapView, basemap]);
+
+  useEffect(() => {
+    mapView?.setHeatBrush(heatBrush);
+  }, [mapView, heatBrush]);
 
   // Leaflet measured the popup before React filled it, so re-layout it.
   useLayoutEffect(() => {

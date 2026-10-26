@@ -17,7 +17,9 @@ const LEGEND_STATES: { state: DriverState; label: string }[] = [
 /** Static key for car colors and category tags on the god map. */
 export default function Legend() {
   return (
-    <div className="legend absolute bottom-fixed-xs left-fixed-xs z-[600] flex max-w-[calc(100%-2*var(--spacing-fixed-xs))] flex-wrap gap-x-fixed-xs gap-y-1 rounded-md bg-gray-90/90 px-fixed-xs py-1.5 text-fluid-xs text-gray-30">
+    // Slides past the open control panel (w-64 = 16rem) from sm up and
+    // narrows to the map width that is left.
+    <div className="legend absolute bottom-fixed-xs left-fixed-xs z-[600] flex max-w-[calc(100%-2*var(--spacing-fixed-xs))] flex-wrap gap-x-fixed-xs gap-y-1 rounded-md bg-gray-90/90 px-fixed-xs py-1.5 text-fluid-xs text-gray-30 transition-transform sm:panel-open:max-w-[calc(100%-16rem-2*var(--spacing-fixed-xs))] sm:panel-open:translate-x-64">
       {LEGEND_STATES.map(({ state, label }) => (
         <span key={state}>
           <i
@@ -29,6 +31,12 @@ export default function Legend() {
       ))}
       <span className="cats">
         X · P · C · XL = UberX · Priority · Comfort · UberXL
+      </span>
+      <span className="flex items-center gap-1.5">
+        Demand low
+        {/* Mirrors HEAT_RAMP_TOKENS in mapView.ts */}
+        <i className="inline-block h-2.5 w-12 rounded-xs bg-linear-to-r from-yellow-30 via-yellow-60 to-orange-90" />
+        high
       </span>
       <span>Click a car for details</span>
     </div>

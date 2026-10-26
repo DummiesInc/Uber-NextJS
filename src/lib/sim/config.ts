@@ -89,3 +89,21 @@ export const CATEGORIES: Record<
     pickupFactor: 1
   }
 };
+
+/** How idle drivers chase demand (see World.pickRoam). */
+export const DEMAND = {
+  /** Chance a roam ignores demand entirely, so quiet areas keep some cars. */
+  explore: 0.15,
+  /** Res-9 rings searched around the driver (~2 km). */
+  searchRings: 12,
+  /** Extra far-away hot cells considered per decision. */
+  farSamples: 40,
+  /** Each idle car already in or heading to an area divides its pull by this much more. */
+  crowdPenalty: 1.5,
+  /** Distance (km) at which a cell's pull halves. */
+  halfPullKm: 2.5,
+  /** Final pick is weighted-random among this many best cells. */
+  shortlist: 6,
+  /** Idle cars re-plan within this many real seconds after demand changes. */
+  replanWithinS: 3
+};
