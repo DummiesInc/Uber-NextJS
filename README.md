@@ -1,36 +1,32 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Mini-Uber · Omaha on H3 (Next.js)
 
-## Getting Started
+A small simulation of Uber-style ride dispatch on Uber's [H3](https://h3geo.org) hexagon grid, ported from the Vite version in `~/Documents/Uber`.
 
-First, run the development server:
+- **Left:** a "god view" map of Omaha showing the H3 grid, roaming drivers, the ring-by-ring driver search, 15-second exclusive offers and the trip lifecycle.
+- **Right:** a phone-style rider app. You pick a pickup, choose UberX / Priority / Comfort / UberXL, and ride to 17041 Lakeside Hills Plaza.
+
+## Run it
 
 ```bash
-npm run dev
-# or
+yarn install
 yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open http://localhost:4000.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### Optional: Claude-powered drivers
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Put `ANTHROPIC_API_KEY=...` in `.env.local` and restart. Click a car and choose **✨ Make Claude-powered**. The browser calls `/api/driver-decision`, and the server calls Claude with the key, so the key never reaches the client.
 
-## Learn More
+## Layout
 
-To learn more about Next.js, take a look at the following resources:
+| Area | Where |
+|---|---|
+| Simulation engine (H3 index, dispatch, drivers, routing) | `src/lib/sim/` |
+| Claude decision route | `src/app/api/driver-decision/route.ts` |
+| Sim loop and event bus context | `src/components/providers/SimulationProvider.tsx` |
+| God-view map, feed, stepper | `src/components/map/` |
+| Rider phone | `src/components/phone/` |
+| Design tokens | `src/app/globals.css` (see `agents/STYLING.md`) |
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+To refresh the road graph from OpenStreetMap, run `yarn roads`.

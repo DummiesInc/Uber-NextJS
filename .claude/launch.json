@@ -1,0 +1,16 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "mini-uber-next",
+      "runtimeExecutable": "yarn",
+      "runtimeArgs": ["dev"],
+      "port": 4000
+    },
+    {
+      "name": "mini-uber-next-attach",
+      "url": "http://localhost:4000",
+      "port": 4000
+    }
+  ]
+}
