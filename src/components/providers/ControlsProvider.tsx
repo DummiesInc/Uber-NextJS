@@ -11,8 +11,14 @@ import {
   type SetStateAction
 } from 'react';
 import { DEFAULT_DRIVER_COUNT, DEFAULT_SIM_SPEED } from '@/lib/sim/config';
+import { HEAT_LEVELS, type HeatLevel } from '@/lib/sim/heat';
 import { savedBasemap, type Basemap } from '@/components/map/basemaps';
-import { HeatTool, type HeatBrush } from '@/components/map/mapView';
+import {
+  AUTO_LEVEL_MODE,
+  HeatTool,
+  type HeatBrush,
+  type LevelMode
+} from '@/components/map/mapView';
 import { useSimulation } from '@/components/providers/SimulationProvider';
 
 const PANEL_OPEN_STORAGE_KEY: string = 'mini-uber.panel-open.v1';
@@ -26,6 +32,21 @@ function loadSavedIsPanelOpen(): boolean {
   }
 }
 
+const LEVEL_MODE_STORAGE_KEY: string = 'mini-uber.level-mode.v1';
+
+/** Defaults to Auto on a first visit, a bad value, or blocked storage. */
+function loadSavedLevelMode(): LevelMode {
+  try {
+    const saved: string | null = localStorage.getItem(LEVEL_MODE_STORAGE_KEY);
+    const level: HeatLevel | undefined = HEAT_LEVELS.find(
+      (res: HeatLevel) => String(res) === saved
+    );
+    return level ?? AUTO_LEVEL_MODE;
+  } catch {
+    return AUTO_LEVEL_MODE;
+  }
+}
+
 interface ControlsContextValue {
   isPanelOpen: boolean;
   setIsPanelOpen: (isOpen: boolean) => void;
@@ -35,8 +56,16 @@ interface ControlsContextValue {
   setSpeed: (speed: number) => void;
   driverCount: number;
   setDriverCount: (count: number) => void;
+  /** Outlines of the cells at the level on screen. */
   isGridVisible: boolean;
   setIsGridVisible: Dispatch<SetStateAction<boolean>>;
+  isParentOutlinesVisible: boolean;
+  setIsParentOutlinesVisible: Dispatch<SetStateAction<boolean>>;
+  levelMode: LevelMode;
+  setLevelMode: (mode: LevelMode) => void;
+  /** The H3 level the map is showing, reported by MapView; not persisted. */
+  currentLevel: HeatLevel;
+  setCurrentLevel: Dispatch<SetStateAction<HeatLevel>>;
   isHeatVisible: boolean;
   setIsHeatVisible: Dispatch<SetStateAction<boolean>>;
   basemap: Basemap;
@@ -64,6 +93,12 @@ export default function ControlsProvider({ children }: ControlsProviderProps) {
   const [driverCount, setDriverCountState] =
     useState<number>(DEFAULT_DRIVER_COUNT);
   const [isGridVisible, setIsGridVisible] = useState<boolean>(true);
+  const [isParentOutlinesVisible, setIsParentOutlinesVisible] =
+    useState<boolean>(true);
+  const [levelMode, setLevelModeState] =
+    useState<LevelMode>(loadSavedLevelMode);
+  // MapView reports the real level as soon as it mounts.
+  const [currentLevel, setCurrentLevel] = useState<HeatLevel>(8);
   const [isHeatVisible, setIsHeatVisible] = useState<boolean>(true);
   const [basemap, setBasemap] = useState<Basemap>(savedBasemap);
   const [heatBrush, setHeatBrush] = useState<HeatBrush>({
@@ -82,6 +117,15 @@ export default function ControlsProvider({ children }: ControlsProviderProps) {
       localStorage.setItem(PANEL_OPEN_STORAGE_KEY, String(isOpen));
     } catch {
       // Storage blocked: the panel just won't remember its state.
+    }
+  }, []);
+
+  const setLevelMode = useCallback((mode: LevelMode) => {
+    setLevelModeState(mode);
+    try {
+      localStorage.setItem(LEVEL_MODE_STORAGE_KEY, String(mode));
+    } catch {
+      // Storage blocked: the level mode just won't be remembered.
     }
   }, []);
 
@@ -121,6 +165,12 @@ export default function ControlsProvider({ children }: ControlsProviderProps) {
       setDriverCount,
       isGridVisible,
       setIsGridVisible,
+      isParentOutlinesVisible,
+      setIsParentOutlinesVisible,
+      levelMode,
+      setLevelMode,
+      currentLevel,
+      setCurrentLevel,
       isHeatVisible,
       setIsHeatVisible,
       basemap,
@@ -138,6 +188,10 @@ export default function ControlsProvider({ children }: ControlsProviderProps) {
       driverCount,
       setDriverCount,
       isGridVisible,
+      isParentOutlinesVisible,
+      levelMode,
+      setLevelMode,
+      currentLevel,
       isHeatVisible,
       basemap,
       heatBrush

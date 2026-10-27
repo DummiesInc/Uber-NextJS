@@ -151,3 +151,45 @@ The rider can now pick up from anywhere in the service area by dropping a pin on
 ## Token gaps
 - There is no light error or warning surface token; the out-of-service box uses `bg-orange-5`.
 - There is no light divider token; `border-gray-10` is used, matching the list rows.
+
+# Run 5: H3 hierarchy and demand by level
+
+The god map now follows H3's parent/child hierarchy as you zoom, and demand is rolled up to whichever level is on screen. Drivers still roam on res-9 demand, and dispatch still searches res-8 rings, so the simulation itself behaves the same.
+
+## Engine (me, before the skills)
+- **`src/lib/sim/heat.ts`:**
+  - `HEAT_LEVELS` (7, 8, 9), `cellsAtLevel(res)` (103 / 627 / 4,122 cells) and `heatDescendants(cell)`.
+  - `HeatMap.total(cell)`: the sum of a cell's res-9 children, kept up to date on every change.
+  - `HeatMap.maxAt(res)` and `HeatMap.intensity(cell)`: share of the busiest cell at that level.
+  - `paint(..., res)`: brushes in cells of the viewed level, and spreads each cell's share to all of its res-9 children.
+- **Bug fixed:** `randomize` wrote its background values without going through `set`, which would have left the roll-up totals out of date.
+
+## Skills, in order
+1. **react-component:**
+   - **`MapView` level of detail:** Auto mode shows res 7 at zoom ≤ 11, res 8 at 12–13 and res 9 at ≥ 14; the level can also be fixed.
+   - **Rendering:** each level has its own canvas panes for outlines, heat and parent outlines (`outline-N`, `heat-N`, `parent-N`). They are built once and crossfaded by switching pane classes.
+   - **Parent outlines** for the next level up.
+   - **Hover family:** the hovered cell, its parent, and its children.
+   - **`CellInfo`** shows the level, parent, child count, demand total and share, drivers here, and a breadcrumb from res 7 down to the current level.
+   - **Controls** (`ControlsProvider`):
+     - `levelMode`, saved to `mini-uber.level-mode.v1`
+     - `isParentOutlinesVisible`
+     - `currentLevel`
+   - **Map section:** a "Cell outlines" switch (the renamed grid toggle), a "Parent outlines" switch, and a "Grid level" select.
+   - **Legend:** "Demand share at res N".
+2. **styling:**
+   - **Fade:** a 350 ms crossfade, eased out for the level coming in and eased in for the one going out (`LEVEL_FADE_MS`).
+   - **Outline weights:** thin for the current level, bold for parents, and on hover a strong parent outline with dashed children.
+   - **Heat opacity per level:** lighter at res 7 so the large cells don't swamp the basemap.
+   - **Tidied:** the `CellInfo` layout (breadcrumb chips, key/value list), the Map section row alignment, and the legend.
+
+## Checks
+- `tsc`, `eslint` and `prettier` all pass.
+- **Roll-up script:** every res-7 and res-8 total equals the sum of its children; Clear empties every level.
+- **Painting** in the browser at each level: a dab with 1 ring changed 209 res-9 cells at res 7, 34 at res 8 and 7 at res 9. The user's saved heat map was restored exactly afterwards.
+- **Screens:** each level was looked at with hover, on Positron (all three levels) and Dark. No console errors.
+
+## Known rough edges
+- In a narrow map (about 250px wide) the hover box overlaps the wrapped legend.
+- At res 7 the brush is capped at 1 ring, while the size chips still show 1–3.
+- The crossfade was only checked in still frames.

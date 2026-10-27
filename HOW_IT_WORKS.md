@@ -21,6 +21,7 @@ Everything runs in the browser except the optional Claude call.
 ### Hexagon grid
 - **[h3-js](https://h3geo.org):** Uber's own H3 hexagonal grid system, and the core of the simulation. It turns a lat/lng into a hexagon ID and finds the rings of hexagons around a cell. It also measures distance in hexagons and gives each hexagon's outline for drawing.
 - **Two sizes:** resolution 8, about 0.74 km² per hex, is used for dispatch. Resolution 9, about 0.1 km² per hex, is used for demand heat.
+- **Three levels on the map:** what is drawn follows the zoom. Res 7 (about 5.2 km²) shows the whole city, res 8 is the default view and res 9 is street level. See [4. The H3 hierarchy on the map](#4-the-h3-hierarchy-on-the-map).
 
 ### Roads and routes
 - **[OSRM](https://project-osrm.org) public demo server:** real turn-by-turn road routes for the rider's trip and for a driver heading to a pickup.
@@ -124,3 +125,30 @@ Measured in the running app:
 - Hot hexagons cover about 6% of the city but end up holding roughly 40–60% of the cars.
 - Each part of the map gets about its share of the demand in cars, and no single hot spot takes the whole fleet.
 - If you paint only one hot spot, about half the fleet heads there and the rest stay spread out.
+
+## 4. The H3 hierarchy on the map
+
+Code: `cellsAtLevel`, `total` and `intensity` in [`src/lib/sim/heat.ts`](src/lib/sim/heat.ts), and the level handling in [`src/components/map/mapView.ts`](src/components/map/mapView.ts)
+
+### Parents and children
+- **Seven children:** every H3 cell has about 7 children one resolution finer. `cellToParent` goes up a level and `cellToChildren` goes down.
+- **Imperfect nesting:** each level is rotated slightly, so the children don't fit the parent's outline exactly. Some poke a little past its edge.
+- **IDs vs geometry:** the hierarchy is defined by cell IDs, not by shapes. A res-9 cell belongs to exactly one res-8 parent even where it sticks out.
+
+### What the map shows at each zoom
+| Zoom | Level drawn | Outlined in bold |
+|---|---|---|
+| 11 or less | res 7 (103 cells) | none |
+| 12–13 | res 8 (627 cells) | res-7 parents |
+| 14 or more | res 9 (4,122 cells) | res-8 parents |
+
+- **Level switches:** each level has its own map layers. Crossing a threshold crossfades them, so the finer cells seem to appear out of their parent.
+- **Fixed level:** the "Grid level" control can lock the map to one level.
+- **Hover:** hovering a cell outlines its parent and its children. The info box shows the chain of IDs from res 7 down to the current level.
+
+### Demand at each level
+- **Base data:** demand is only stored at res 9.
+- **Totals:** a res-8 or res-7 cell's demand is the **sum** of its res-9 children. It is updated incrementally whenever a res-9 value changes.
+- **Sum, not average:** a parent full of busy streets should outrank one with a single hot corner. An average would make them look the same.
+- **Colour:** set by the cell's **share of the busiest cell at that level** (`intensity`), so the most important area is the darkest at every zoom. Otherwise totals at res 7 (up to about 18) would dwarf res-9 values (0–1).
+- **Painting:** the brush works at the level on screen. A dab on a res-7 cell raises all of its roughly 40–49 res-9 children at once.

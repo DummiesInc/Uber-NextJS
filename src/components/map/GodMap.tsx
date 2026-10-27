@@ -23,7 +23,15 @@ import { useControls } from '@/components/providers/ControlsProvider';
 /** The god-view Leaflet map; Leaflet owns the map DOM, React owns overlays. */
 export default function GodMap() {
   const { world, bus, llmEnabled, registerFrame } = useSimulation();
-  const { isGridVisible, isHeatVisible, basemap, heatBrush } = useControls();
+  const {
+    isGridVisible,
+    isParentOutlinesVisible,
+    levelMode,
+    setCurrentLevel,
+    isHeatVisible,
+    basemap,
+    heatBrush
+  } = useControls();
   const mapElRef = useRef<HTMLDivElement>(null);
   const nextPersonaIndexRef = useRef<number>(0);
   const [cellHover, setCellHover] = useState<CellHoverInfo | null>(null);
@@ -38,6 +46,7 @@ export default function GodMap() {
     if (!mapEl) return;
     const mapView: MapView = new MapView(mapEl, world, bus, {
       onCellHover: setCellHover,
+      onLevelChange: setCurrentLevel,
       onDriverPopupOpen: setDriverPopup,
       onDriverPopupClose: (driver: Driver) =>
         setDriverPopup((open) => (open?.driver === driver ? null : open))
@@ -49,12 +58,20 @@ export default function GodMap() {
       setMapView(null);
       mapView.destroy();
     };
-  }, [world, bus, registerFrame]);
+  }, [world, bus, registerFrame, setCurrentLevel]);
 
   // MapView is recreated on remount, so re-apply the map settings to it.
   useEffect(() => {
     mapView?.setGridVisible(isGridVisible);
   }, [mapView, isGridVisible]);
+
+  useEffect(() => {
+    mapView?.setParentOutlinesVisible(isParentOutlinesVisible);
+  }, [mapView, isParentOutlinesVisible]);
+
+  useEffect(() => {
+    mapView?.setLevelMode(levelMode);
+  }, [mapView, levelMode]);
 
   useEffect(() => {
     mapView?.setHeatVisible(isHeatVisible);

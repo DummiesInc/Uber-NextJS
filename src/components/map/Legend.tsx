@@ -1,4 +1,5 @@
 import type { DriverState } from '@/lib/sim/types';
+import { useControls } from '@/components/providers/ControlsProvider';
 
 const STATE_SWATCH: Record<DriverState, string> = {
   idle: 'bg-teal-50',
@@ -14,8 +15,10 @@ const LEGEND_STATES: { state: DriverState; label: string }[] = [
   { state: 'onTrip', label: 'On trip' }
 ];
 
-/** Static key for car colors and category tags on the god map. */
+/** Key for car colors, category tags and the demand ramp on the god map. */
 export default function Legend() {
+  const { currentLevel } = useControls();
+
   return (
     // Slides past the open control panel (w-64 = 16rem) from sm up and
     // narrows to the map width that is left.
@@ -32,8 +35,8 @@ export default function Legend() {
       <span className="cats">
         X · P · C · XL = UberX · Priority · Comfort · UberXL
       </span>
-      <span className="flex items-center gap-1.5">
-        Demand low
+      <span className="flex items-center gap-1.5 whitespace-nowrap tabular-nums">
+        Demand share at res {currentLevel}: low
         {/* Mirrors HEAT_RAMP_TOKENS in mapView.ts */}
         <i className="inline-block h-2.5 w-12 rounded-xs bg-linear-to-r from-yellow-30 via-yellow-60 to-orange-90" />
         high

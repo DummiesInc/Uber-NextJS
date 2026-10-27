@@ -1,6 +1,8 @@
 import L from 'leaflet';
 import {
   cellToBoundary,
+  cellToChildren,
+  cellToParent,
   cellsToMultiPolygon,
   gridDisk,
   latLngToCell
@@ -14,8 +16,13 @@ import {
 } from '@/lib/sim/config';
 import type { EventBus } from '@/lib/sim/events';
 import type { Driver } from '@/lib/sim/driver';
-import { SERVICE_CELLS, SERVICE_SET } from '@/lib/sim/grid';
-import { HEAT_CELLS, toHeatCell } from '@/lib/sim/heat';
+import {
+  HEAT_LEVELS,
+  HEAT_RES,
+  cellsAtLevel,
+  toHeatCell,
+  type HeatLevel
+} from '@/lib/sim/heat';
 import type { World } from '@/lib/sim/world';
 import type { LatLng, Route } from '@/lib/sim/types';
 import {
@@ -43,11 +50,94 @@ interface ActiveOffer {
   startedAt: number;
 }
 
+/** One step of a hovered cell's ancestry, coarse to fine. */
+export interface CellBreadcrumb {
+  res: HeatLevel;
+  cell: string;
+}
+
 /** What the hovered H3 cell looks like, reported to React for the overlay. */
 export interface CellHoverInfo {
   cell: string;
+  res: HeatLevel;
+  /** The next-coarser shown level's cell, or null at res 7. */
+  parent: string | null;
+  /** How many next-finer cells with service area lie under it (0 at res 9). */
+  children: number;
+  /** Total demand under the cell (sum of its res-9 values). */
+  demand: number;
+  /** Demand relative to the busiest cell at this level, 0–1. */
+  share: number;
+  /** res 7 down to this cell. */
+  breadcrumb: CellBreadcrumb[];
   driversHere: number;
   occupiedCells: number;
+}
+
+export const AUTO_LEVEL_MODE = 'auto' as const;
+/** 'auto' picks the level from the zoom; a HeatLevel pins the map to it. */
+export type LevelMode = HeatLevel | typeof AUTO_LEVEL_MODE;
+
+/** Auto mode shows the first level whose `maxZoom` covers the zoom, else res 9. */
+export const AUTO_LEVEL_MAX_ZOOM: { level: HeatLevel; maxZoom: number }[] = [
+  { level: 7, maxZoom: 11 },
+  { level: 8, maxZoom: 13 }
+];
+
+const levelForZoom = (zoom: number): HeatLevel =>
+  AUTO_LEVEL_MAX_ZOOM.find(({ maxZoom }) => zoom <= maxZoom)?.level ?? HEAT_RES;
+
+const parentLevel = (res: HeatLevel): HeatLevel | null =>
+  res === HEAT_LEVELS[0] ? null : ((res - 1) as HeatLevel);
+
+const childLevel = (res: HeatLevel): HeatLevel | null =>
+  res === HEAT_RES ? null : ((res + 1) as HeatLevel);
+
+/** Every cell with service area under it, per level, for hover hit tests. */
+const LEVEL_CELL_SETS = new Map<HeatLevel, Set<string>>(
+  HEAT_LEVELS.map((res: HeatLevel) => [res, new Set(cellsAtLevel(res))])
+);
+
+/** A res-7 brush of 2+ rings covers most of the city, so cap it. */
+const MAX_RES7_BRUSH_RINGS: number = 1;
+
+/** Each level draws into its own three panes so a level fades as one. */
+enum LevelPaneKind {
+  Outline = 'outline',
+  Heat = 'heat',
+  Parent = 'parent'
+}
+
+// Unlayered leaflet.css outranks Tailwind's z-* utilities, so set it inline.
+// Basemap (200) < outline (300) < heat (350) < parent (360) < overlays (400).
+const LEVEL_PANE_Z: Record<LevelPaneKind, string> = {
+  [LevelPaneKind.Outline]: '300',
+  [LevelPaneKind.Heat]: '350',
+  [LevelPaneKind.Parent]: '360'
+};
+
+const levelPaneName = (kind: LevelPaneKind, res: HeatLevel): string =>
+  `${kind}-${res}`;
+
+/**
+ * Crossfade between levels: every level pane carries `base`, plus `shown`
+ * or `hidden`. Both run at once; the incoming level eases out (fast start)
+ * while the outgoing one eases in (lingers), so the new cells grow out of
+ * the old ones. LEVEL_FADE_MS must match the duration class.
+ */
+const LEVEL_PANE_CLASS = {
+  base: 'level-pane transition-opacity duration-350',
+  shown: 'opacity-100 ease-out',
+  hidden: 'opacity-0 pointer-events-none ease-in'
+};
+const LEVEL_FADE_MS: number = 350;
+
+/** One level's canvas layers, built on first show and kept. */
+interface LevelLayers {
+  heatPolys: Map<string, L.Polygon>;
+  heat: L.LayerGroup;
+  outline: L.Polygon;
+  parentOutline: L.Polygon | null;
 }
 
 /** An open driver popup: React portals its content into `container`. */
@@ -63,7 +153,10 @@ export enum HeatTool {
   Erase = 'erase'
 }
 
-/** The active heat-map editing tool; `rings` is the brush radius (1–3). */
+/**
+ * The active heat-map editing tool. `rings` is the brush radius (1–3) in
+ * cells of the level on screen, capped at 1 at res 7.
+ */
 export interface HeatBrush {
   tool: HeatTool;
   rings: number;
@@ -72,6 +165,7 @@ export interface HeatBrush {
 
 export interface MapViewCallbacks {
   onCellHover: (info: CellHoverInfo | null) => void;
+  onLevelChange: (level: HeatLevel) => void;
   onDriverPopupOpen: (target: DriverPopupTarget) => void;
   onDriverPopupClose: (driver: Driver) => void;
 }
@@ -90,7 +184,13 @@ const HEX_CLASS = {
     'ring-old fill-surface-accent [fill-opacity:.1] stroke-stroke-accent [stroke-opacity:.4] stroke-1',
   brush:
     'brush-hex fill-none stroke-gray-90 stroke-2 [stroke-dasharray:4_4] in-[.theme-dark]:stroke-gray-5',
-  hover: 'hover-hex fill-blue-40 [fill-opacity:.12] stroke-blue-60 stroke-2',
+  // Hover family, strongest to quietest: parent, hovered cell, children.
+  hover:
+    'hover-hex fill-blue-40 [fill-opacity:.18] stroke-blue-60 stroke-2 in-[.theme-dark]:[fill-opacity:.22] in-[.theme-dark]:stroke-blue-40',
+  hoverParent:
+    'hover-parent fill-none stroke-blue-70 stroke-3 in-[.theme-dark]:stroke-blue-30',
+  hoverChildren:
+    'hover-children fill-none stroke-blue-50 [stroke-opacity:.8] stroke-1 [stroke-dasharray:3_3] in-[.theme-dark]:stroke-blue-40',
   route:
     'route-hex fill-blue-50 [fill-opacity:.1] stroke-blue-60 [stroke-opacity:.5] stroke-1 in-[.theme-dark]:fill-blue-40 in-[.theme-dark]:stroke-blue-40'
 };
@@ -122,18 +222,66 @@ const HEAT_RAMP_TOKENS: string[] = [
 ];
 let heatRampColors: string[] = [];
 
+interface HeatOpacity {
+  base: number;
+  range: number;
+}
+
 /**
- * fillOpacity = base + range * sqrt(value). The square root lifts the faint
- * background (0.03–0.12) and light dabs so they read on Positron; dark
- * basemaps make the same colours glow, so they start lower.
+ * fillOpacity = base + range * sqrt(value), per level and basemap theme. The
+ * square root lifts the faint background and light dabs so they read; big
+ * res-7 cells wash over whole neighbourhoods, so they start lowest, and
+ * small res-9 cells start highest so they stay visible. Dark basemaps make
+ * the same colours glow, so they start lower still.
  */
-const HEAT_OPACITY = {
-  light: { base: 0.28, range: 0.47 },
-  dark: { base: 0.15, range: 0.6 }
+const HEAT_OPACITY: Record<HeatLevel, Record<'light' | 'dark', HeatOpacity>> = {
+  7: { light: { base: 0.1, range: 0.5 }, dark: { base: 0.06, range: 0.52 } },
+  8: { light: { base: 0.14, range: 0.52 }, dark: { base: 0.08, range: 0.56 } },
+  9: { light: { base: 0.18, range: 0.54 }, dark: { base: 0.1, range: 0.6 } }
 };
 
-/** Canvas fill for a demand value in 0–1; zero is fully transparent. */
-function heatStyle(value: number, isDark: boolean): L.PathOptions {
+interface OutlineTokenStyle {
+  color: string;
+  opacity: number;
+  weight: number;
+}
+
+/**
+ * Outline hierarchy: the current level's cells are hairlines, the parent
+ * level's are ~2.5x heavier and darker so groups of ~7 children read, and
+ * the SVG hover family (HEX_CLASS) sits above both. `color` is a colour
+ * token; widths are canvas px, so there is no token for them.
+ */
+const OUTLINE_STYLE: Record<'light' | 'dark', OutlineTokenStyle> = {
+  light: { color: 'gray-60', opacity: 0.35, weight: 0.75 },
+  dark: { color: 'gray-30', opacity: 0.28, weight: 0.7 }
+};
+
+/** Outlines of the next-coarser level, drawn over the heat (no fill). */
+const PARENT_OUTLINE_STYLE: Record<'light' | 'dark', OutlineTokenStyle> = {
+  light: { color: 'gray-90', opacity: 0.55, weight: 1.75 },
+  dark: { color: 'gray-5', opacity: 0.45, weight: 1.5 }
+};
+
+const outlinePathOptions = ({
+  color,
+  opacity,
+  weight
+}: OutlineTokenStyle): L.PathOptions => ({
+  color: colorToken(color),
+  opacity,
+  weight
+});
+
+/**
+ * Canvas fill for a cell's demand share (HeatMap.intensity) in 0–1; zero is
+ * fully transparent.
+ */
+function heatStyle(
+  value: number,
+  res: HeatLevel,
+  isDark: boolean
+): L.PathOptions {
   if (heatRampColors.length === 0) {
     heatRampColors = HEAT_RAMP_TOKENS.map(colorToken);
   }
@@ -142,7 +290,8 @@ function heatStyle(value: number, isDark: boolean): L.PathOptions {
     heatRampColors.length - 1,
     Math.floor(value * heatRampColors.length)
   );
-  const { base, range } = isDark ? HEAT_OPACITY.dark : HEAT_OPACITY.light;
+  const { base, range }: HeatOpacity =
+    HEAT_OPACITY[res][isDark ? 'dark' : 'light'];
   return {
     fillColor: heatRampColors[step],
     fillOpacity: base + range * Math.sqrt(value)
@@ -151,9 +300,15 @@ function heatStyle(value: number, isDark: boolean): L.PathOptions {
 
 export class MapView {
   readonly map: L.Map;
-  private renderer: L.Canvas;
-  private heatRenderer: L.Canvas;
-  private heatPolys = new Map<string, L.Polygon>();
+  /** Canvas renderer per level pane, keyed by pane name. */
+  private renderers = new Map<string, L.Canvas>();
+  private levels = new Map<HeatLevel, LevelLayers>();
+  private levelMode: LevelMode = AUTO_LEVEL_MODE;
+  private level: HeatLevel = levelForZoom(MAP_ZOOM);
+  /** Busiest res-9 value at the last restyle; a change restyles every cell. */
+  private lastHeatMax: number = -1;
+  private outlineStyle: L.PathOptions = {};
+  private parentOutlineStyle: L.PathOptions = {};
   /** Mirrors `.theme-dark` on the container; heat opacity depends on it. */
   private isDarkBasemap: boolean = false;
   private heatBrush: HeatBrush = {
@@ -170,7 +325,8 @@ export class MapView {
   private ringLayer = L.layerGroup();
   private routeLayer = L.layerGroup();
   private pickupLayer = L.layerGroup();
-  private hoverHex: L.Polygon | null = null;
+  /** Hovered cell, its parent and its children (SVG, a few shapes). */
+  private hoverLayer = L.layerGroup();
   private offerLine: L.Polyline | null = null;
   private person: L.Marker;
   private dest: L.Marker;
@@ -178,7 +334,6 @@ export class MapView {
   private riderDriverId: number | null = null;
   private pickup: LatLng | null = null;
   private currentRing: L.Polygon[] = [];
-  private gridPolys: L.Polygon[] = [];
   private basemap: Basemap | null = null;
   private basemapLayer: L.Layer | null = null;
   private hoveredCell: CellHoverInfo | null = null;
@@ -197,20 +352,31 @@ export class MapView {
     );
     // Top-right keeps the left edge free for the control panel drawer.
     L.control.zoom({ position: 'topright' }).addTo(this.map);
-    // Panes: basemap (200) < grid (300) < heat (350) < overlays (400) < cars.
-    // Unlayered leaflet.css outranks Tailwind's z-* utilities, so set it here.
-    this.map.createPane('grid').style.zIndex = '300';
-    this.map.createPane('heat').style.zIndex = '350';
-    this.renderer = L.canvas({ padding: 0.3, pane: 'grid' });
-    this.heatRenderer = L.canvas({ padding: 0.3, pane: 'heat' });
-    this.drawGrid();
-    this.drawHeat();
+    for (const res of HEAT_LEVELS) {
+      for (const kind of Object.values(LevelPaneKind)) {
+        if (kind === LevelPaneKind.Parent && parentLevel(res) === null) {
+          continue;
+        }
+        const name: string = levelPaneName(kind, res);
+        const pane: HTMLElement = this.map.createPane(name);
+        pane.style.zIndex = LEVEL_PANE_Z[kind];
+        pane.classList.add(
+          ...LEVEL_PANE_CLASS.base.split(' '),
+          ...LEVEL_PANE_CLASS.hidden.split(' ')
+        );
+        this.renderers.set(name, L.canvas({ padding: 0.3, pane: name }));
+      }
+    }
     this.unsubscribers.push(
       world.heat.onChange((changed: string[] | null) =>
         this.restyleHeat(changed)
       )
     );
     this.setBasemap(savedBasemap());
+    this.showLevel(this.level);
+    this.callbacks.onLevelChange(this.level);
+    this.map.on('zoomend', () => this.updateLevel());
+    this.hoverLayer.addTo(this.map);
     this.ringLayer.addTo(this.map);
     this.routeLayer.addTo(this.map);
     this.pickupLayer.addTo(this.map);
@@ -246,8 +412,7 @@ export class MapView {
     this.map.on('mouseout', () => {
       this.endStroke();
       this.hideBrush();
-      this.hoverHex?.remove();
-      this.reportCellHover(null);
+      this.clearHover();
     });
 
     this.unsubscribers.push(
@@ -357,12 +522,131 @@ export class MapView {
     this.cars.clear();
   }
 
+  /** Cell outlines of the level on screen. */
   setGridVisible(isVisible: boolean): void {
-    this.map.getPane('grid')?.classList.toggle('hidden', !isVisible);
+    this.toggleLevelPanes(LevelPaneKind.Outline, isVisible);
   }
 
   setHeatVisible(isVisible: boolean): void {
-    this.map.getPane('heat')?.classList.toggle('hidden', !isVisible);
+    this.toggleLevelPanes(LevelPaneKind.Heat, isVisible);
+  }
+
+  /** Bold outlines of the next-coarser level over the current one. */
+  setParentOutlinesVisible(isVisible: boolean): void {
+    this.toggleLevelPanes(LevelPaneKind.Parent, isVisible);
+  }
+
+  setLevelMode(mode: LevelMode): void {
+    this.levelMode = mode;
+    this.updateLevel();
+  }
+
+  private toggleLevelPanes(kind: LevelPaneKind, isVisible: boolean): void {
+    for (const res of HEAT_LEVELS) {
+      this.map
+        .getPane(levelPaneName(kind, res))
+        ?.classList.toggle('hidden', !isVisible);
+    }
+  }
+
+  /** Switch to the level the mode and zoom call for, fading the old one out. */
+  private updateLevel(): void {
+    const next: HeatLevel =
+      this.levelMode === AUTO_LEVEL_MODE
+        ? levelForZoom(this.map.getZoom())
+        : this.levelMode;
+    if (next === this.level) return;
+    const previous: HeatLevel = this.level;
+    this.level = next;
+    this.showLevel(next);
+    this.fadeOutLevel(previous);
+    this.clearHover();
+    this.hideBrush();
+    this.strokeCell = null;
+    this.callbacks.onLevelChange(next);
+  }
+
+  private setLevelPanesShown(res: HeatLevel, isShown: boolean): void {
+    const [add, remove] = isShown
+      ? [LEVEL_PANE_CLASS.shown, LEVEL_PANE_CLASS.hidden]
+      : [LEVEL_PANE_CLASS.hidden, LEVEL_PANE_CLASS.shown];
+    for (const kind of Object.values(LevelPaneKind)) {
+      const pane: HTMLElement | undefined = this.map.getPane(
+        levelPaneName(kind, res)
+      );
+      pane?.classList.remove(...remove.split(' '));
+      pane?.classList.add(...add.split(' '));
+    }
+  }
+
+  private showLevel(res: HeatLevel): void {
+    const layers: LevelLayers = this.levels.get(res) ?? this.buildLevel(res);
+    layers.heat.addTo(this.map);
+    layers.outline.addTo(this.map);
+    layers.parentOutline?.addTo(this.map);
+    // Other levels skip restyles while hidden, so catch up on show.
+    this.restyleHeat(null);
+    this.setLevelPanesShown(res, true);
+  }
+
+  /** Fade the panes, then drop the layers so hidden canvases stop redrawing. */
+  private fadeOutLevel(res: HeatLevel): void {
+    this.setLevelPanesShown(res, false);
+    this.later(() => {
+      if (res === this.level) return;
+      const layers: LevelLayers | undefined = this.levels.get(res);
+      layers?.heat.remove();
+      layers?.outline.remove();
+      layers?.parentOutline?.remove();
+    }, LEVEL_FADE_MS);
+  }
+
+  private buildLevel(res: HeatLevel): LevelLayers {
+    const heatRenderer: L.Canvas | undefined = this.renderers.get(
+      levelPaneName(LevelPaneKind.Heat, res)
+    );
+    const heatPolys = new Map<string, L.Polygon>();
+    const heat: L.LayerGroup = L.layerGroup();
+    for (const cell of LEVEL_CELL_SETS.get(res)!) {
+      const poly: L.Polygon = L.polygon(hexLatLngs(cell), {
+        renderer: heatRenderer,
+        stroke: false,
+        interactive: false,
+        fillOpacity: 0
+      }).addTo(heat);
+      heatPolys.set(cell, poly);
+    }
+    // One multi-polygon per outline layer: each cell's own boundary, so H3's
+    // imperfect parent/child containment shows.
+    const outline: L.Polygon = L.polygon(
+      [...LEVEL_CELL_SETS.get(res)!].map((cell: string) => [hexLatLngs(cell)]),
+      {
+        renderer: this.renderers.get(levelPaneName(LevelPaneKind.Outline, res)),
+        fill: false,
+        interactive: false,
+        ...this.outlineStyle
+      }
+    );
+    const parent: HeatLevel | null = parentLevel(res);
+    const parentOutline: L.Polygon | null =
+      parent === null
+        ? null
+        : L.polygon(
+            [...LEVEL_CELL_SETS.get(parent)!].map((cell: string) => [
+              hexLatLngs(cell)
+            ]),
+            {
+              renderer: this.renderers.get(
+                levelPaneName(LevelPaneKind.Parent, res)
+              ),
+              fill: false,
+              interactive: false,
+              ...this.parentOutlineStyle
+            }
+          );
+    const layers: LevelLayers = { heatPolys, heat, outline, parentOutline };
+    this.levels.set(res, layers);
+    return layers;
   }
 
   /** Switch the heat editing tool; any active tool disables map dragging. */
@@ -375,8 +659,7 @@ export class MapView {
       this.map.dragging.disable();
       this.map.doubleClickZoom.disable();
       this.map.getContainer().classList.add('leaflet-crosshair');
-      this.hoverHex?.remove();
-      this.reportCellHover(null);
+      this.clearHover();
     } else if (!isPainting && wasPainting) {
       this.map.dragging.enable();
       this.map.doubleClickZoom.enable();
@@ -388,35 +671,52 @@ export class MapView {
     }
   }
 
-  private drawHeat(): void {
-    for (const cell of HEAT_CELLS) {
-      this.heatPolys.set(
-        cell,
-        L.polygon(hexLatLngs(cell), {
-          renderer: this.heatRenderer,
-          stroke: false,
-          interactive: false,
-          ...heatStyle(this.world.heat.get(cell), this.isDarkBasemap)
-        }).addTo(this.map)
-      );
-    }
-  }
-
+  /**
+   * Restyle the level on screen. Shares are relative to the level's busiest
+   * cell, so any change can recolour every cell: res 7/8 always restyle all,
+   * res 9 only the changed cells unless the max moved.
+   */
   private restyleHeat(changed: string[] | null): void {
-    for (const cell of changed ?? HEAT_CELLS) {
-      this.heatPolys
+    const layers: LevelLayers | undefined = this.levels.get(this.level);
+    if (!layers) return;
+    const max: number = this.world.heat.maxAt(this.level);
+    const cells: Iterable<string> =
+      changed === null || this.level !== HEAT_RES || max !== this.lastHeatMax
+        ? layers.heatPolys.keys()
+        : changed;
+    if (this.level === HEAT_RES) this.lastHeatMax = max;
+    for (const cell of cells) {
+      layers.heatPolys
         .get(cell)
-        ?.setStyle(heatStyle(this.world.heat.get(cell), this.isDarkBasemap));
+        ?.setStyle(
+          heatStyle(
+            this.world.heat.intensity(cell),
+            this.level,
+            this.isDarkBasemap
+          )
+        );
     }
   }
 
-  /** Paints once per res-9 cell entered, so a still cursor doesn't pile up. */
+  private get brushRings(): number {
+    return this.level === HEAT_LEVELS[0]
+      ? Math.min(this.heatBrush.rings, MAX_RES7_BRUSH_RINGS)
+      : this.heatBrush.rings;
+  }
+
+  /** Paints once per cell entered at the level on screen, so a still cursor doesn't pile up. */
   private paintStroke(p: L.LatLng): void {
-    const cell: string = toHeatCell(p);
+    const cell: string = latLngToCell(p.lat, p.lng, this.level);
     if (cell === this.strokeCell) return;
     this.strokeCell = cell;
-    const { tool, rings, strength } = this.heatBrush;
-    this.world.heat.paint(p, rings, strength, tool === HeatTool.Erase);
+    const { tool, strength } = this.heatBrush;
+    this.world.heat.paint(
+      p,
+      this.brushRings,
+      strength,
+      tool === HeatTool.Erase,
+      this.level
+    );
   }
 
   private endStroke(): void {
@@ -425,15 +725,16 @@ export class MapView {
   }
 
   private showBrush(p: L.LatLng): void {
-    const cell: string = toHeatCell(p);
+    const cell: string = latLngToCell(p.lat, p.lng, this.level);
     if (cell === this.brushCell && this.brushHex) return;
     this.drawBrush(cell);
   }
 
+  /** `cell` is at the level on screen; the brush is a disk of that level. */
   private drawBrush(cell: string): void {
     this.brushCell = cell;
     const outline = cellsToMultiPolygon(
-      gridDisk(cell, this.heatBrush.rings)
+      gridDisk(cell, this.brushRings)
     ) as L.LatLngTuple[][][];
     if (!this.brushHex) {
       this.brushHex = L.polygon(outline, {
@@ -508,30 +809,20 @@ export class MapView {
     }, 1200);
   }
 
-  private drawGrid(): void {
-    for (const cell of SERVICE_CELLS) {
-      this.gridPolys.push(
-        L.polygon(hexLatLngs(cell), {
-          renderer: this.renderer,
-          weight: 0.6,
-          fill: false,
-          interactive: false
-        }).addTo(this.map)
-      );
-    }
-  }
-
-  /** Swap the tile layer and restyle the grid and heat for its theme. */
+  /** Swap the tile layer and restyle the outlines and heat for its theme. */
   setBasemap(basemap: Basemap): void {
     if (basemap === this.basemap) return;
     this.basemapLayer?.remove();
     this.basemap = basemap;
     this.basemapLayer = basemapLayer(basemap).addTo(this.map);
     this.map.getContainer().classList.toggle('theme-dark', basemap.dark);
-    const gridStyle: L.PathOptions = basemap.dark
-      ? { color: colorToken('gray-30'), opacity: 0.22, weight: 0.6 }
-      : { color: colorToken('gray-70'), opacity: 0.4, weight: 0.8 };
-    for (const p of this.gridPolys) p.setStyle(gridStyle);
+    const theme: 'light' | 'dark' = basemap.dark ? 'dark' : 'light';
+    this.outlineStyle = outlinePathOptions(OUTLINE_STYLE[theme]);
+    this.parentOutlineStyle = outlinePathOptions(PARENT_OUTLINE_STYLE[theme]);
+    for (const layers of this.levels.values()) {
+      layers.outline.setStyle(this.outlineStyle);
+      layers.parentOutline?.setStyle(this.parentOutlineStyle);
+    }
     this.isDarkBasemap = basemap.dark;
     this.restyleHeat(null);
     saveBasemap(basemap);
@@ -615,27 +906,82 @@ export class MapView {
     }
   }
 
+  /** Hover the cell of the level on screen, with its parent and children. */
   private showCellInfo(p: L.LatLng): void {
-    const cell = latLngToCell(p.lat, p.lng, H3_RES);
-    if (!SERVICE_SET.has(cell)) {
-      this.hoverHex?.remove();
-      this.reportCellHover(null);
+    const res: HeatLevel = this.level;
+    const cell: string = latLngToCell(p.lat, p.lng, res);
+    if (!LEVEL_CELL_SETS.get(res)!.has(cell)) {
+      this.clearHover();
       return;
+    }
+    const parentRes: HeatLevel | null = parentLevel(res);
+    const parent: string | null =
+      parentRes === null ? null : cellToParent(cell, parentRes);
+    const childRes: HeatLevel | null = childLevel(res);
+    const children: string[] =
+      childRes === null
+        ? []
+        : cellToChildren(cell, childRes).filter((child: string) =>
+            LEVEL_CELL_SETS.get(childRes)!.has(child)
+          );
+    if (cell !== this.hoveredCell?.cell) {
+      this.hoverLayer.clearLayers();
+      if (children.length > 0) {
+        L.polygon(
+          children.map((child: string) => [hexLatLngs(child)]),
+          { className: HEX_CLASS.hoverChildren, interactive: false }
+        ).addTo(this.hoverLayer);
+      }
+      L.polygon(hexLatLngs(cell), {
+        className: HEX_CLASS.hover,
+        interactive: false
+      }).addTo(this.hoverLayer);
+      if (parent !== null) {
+        L.polygon(hexLatLngs(parent), {
+          className: HEX_CLASS.hoverParent,
+          interactive: false
+        }).addTo(this.hoverLayer);
+      }
     }
     this.reportCellHover({
       cell,
-      driversHere: this.world.index.byCell.get(cell)?.size ?? 0,
+      res,
+      parent,
+      children: children.length,
+      demand: this.world.heat.total(cell),
+      share: this.world.heat.intensity(cell),
+      breadcrumb: HEAT_LEVELS.filter((r: HeatLevel) => r <= res).map(
+        (r: HeatLevel) => ({
+          res: r,
+          cell: r === res ? cell : cellToParent(cell, r)
+        })
+      ),
+      driversHere: this.countDriversIn(cell, res),
       occupiedCells: this.world.index.occupiedCellCount
     });
-    if (!this.hoverHex) {
-      this.hoverHex = L.polygon(hexLatLngs(cell), {
-        className: HEX_CLASS.hover,
-        interactive: false
-      });
-    } else {
-      this.hoverHex.setLatLngs(hexLatLngs(cell));
+  }
+
+  /** Drivers are indexed by dispatch cell, so roll up coarser and scan finer. */
+  private countDriversIn(cell: string, res: HeatLevel): number {
+    const { byCell } = this.world.index;
+    if (res > H3_RES) {
+      let count: number = 0;
+      for (const d of this.world.drivers.values()) {
+        if (toHeatCell(d.pos) === cell) count++;
+      }
+      return count;
     }
-    this.hoverHex.addTo(this.map);
+    const dispatchCells: string[] =
+      res === H3_RES ? [cell] : cellToChildren(cell, H3_RES);
+    return dispatchCells.reduce(
+      (sum: number, c: string) => sum + (byCell.get(c)?.size ?? 0),
+      0
+    );
+  }
+
+  private clearHover(): void {
+    this.hoverLayer.clearLayers();
+    this.reportCellHover(null);
   }
 
   /** Only notifies React when what the overlay shows actually changed. */
@@ -646,6 +992,8 @@ export class MapView {
       (prev &&
         info &&
         prev.cell === info.cell &&
+        prev.demand === info.demand &&
+        prev.share === info.share &&
         prev.driversHere === info.driversHere &&
         prev.occupiedCells === info.occupiedCells)
     ) {
