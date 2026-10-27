@@ -193,3 +193,85 @@ The god map now follows H3's parent/child hierarchy as you zoom, and demand is r
 - In a narrow map (about 250px wide) the hover box overlaps the wrapped legend.
 - At res 7 the brush is capped at 1 ring, while the size chips still show 1–3.
 - The crossfade was only checked in still frames.
+
+# Run 6: census page and navigation rail
+
+This adds a separate `/census` page with a map and a control panel. It shows 2020 Census population, moved from block groups onto H3 hexagons. A left navigation rail switches between it and the simulator. The simulator's own files were not changed.
+
+## Data (me, before the skills)
+- **`scripts/build-census.mjs` (`yarn census`):** downloads 2020 block groups with `POP100` and `HU100` from TIGERweb (no key) for the service-area box.
+  - 470 block groups: Douglas, NE and Pottawattamie, IA.
+  - Each res-9 cell is given to the block group its centre falls in.
+  - Writes `src/lib/census/data/blockGroups.json` (175 KB) and `blockGroupShapes.json` (257 KB, outlines simplified to about 5 m).
+- **`src/lib/census/hexData.ts`:** `CENSUS_DATASETS` (population for now), `buildHexLayer` (even split, then sums at res 8 and 7, plus quantile breaks per level), `bandOf`, `cellsWithData` and `sourceBlockGroups`.
+- **Check:** 549,436 people at every level (7,424 / 1,135 / 187 cells).
+- **Why TIGERweb:** the Census data API now needs a key.
+
+## Skills, in order
+1. **react-component:**
+   - **`NavRail`** in the root layout: fixed on the left, 56px collapsed, 200px when expanded, overlaying the page. Its state is saved.
+   - **The `/census` route**, loaded client-side only.
+   - **`CensusControlsProvider`:** settings saved under `mini-uber.census.*.v1`.
+   - **`CensusMapView`:** Leaflet with per-level canvas panes and a crossfade, Auto level by zoom, Bands / Linear / √ colouring, hex and block-group outlines, and hover.
+   - **`CensusControlPanel`**, **`CensusHoverBox`** and **`CensusLegend`**.
+2. **styling:**
+   - **Ramp:** teal-20 → blue-80 with evenly spaced lightness, reversed on dark basemaps. Default opacity is 0.5, boosted 1.3× on dark.
+   - **Hover box** moved to the top right so it can't hit the legend.
+   - **Outlines:** hex lines thin, in the basemap's own tone; block-group lines bolder, in the opposite tone.
+   - **Rail:** active bar, hover and focus states, and the expand and fade animation.
+   - **Fix:** the census page scrolled sideways at phone width.
+
+## Checks
+- `tsc`, `eslint` and `prettier` all pass.
+- In the browser: `/census` at all three levels, light and dark basemaps, hover, legend modes and block-group outlines; the rail goes both ways; `/` still works. No console errors.
+- `git diff` shows no changes under `map/`, `phone/`, `modules/`, `providers/` or `lib/sim`.
+
+## Follow-ups
+- **More datasets:** housing units (`HU100`) is already in the data file, so adding it is one entry in `CENSUS_DATASETS`.
+- **American Community Survey figures** (income, age and so on) would need a free Census API key, plus averages weighted by population instead of sums.
+- **Simulator width:** at narrow windows the simulator's map is 56px narrower because of the rail.
+
+# Run 7: crime datasets on the census page
+
+The census page now has two more datasets from Omaha Police Department 2025 incident data: incident counts and incidents per 1,000 residents. Both have a crime-type filter. Only census files were changed: nothing in the simulator or the nav rail.
+
+## Data (me, before the skills)
+- **`scripts/build-crime.mjs` (`yarn crime`, with `--year` and `--file`):** downloads the OPD CSV and counts cases per res-9 cell for each category: violent, property, other and non-criminal, plus totals with and without non-criminal calls.
+  - 45,191 offense rows → 39,298 cases → 37,709 kept (733 have no location, 856 fall outside the hexes).
+  - Every offense description matched a category.
+  - The file has no drug or weapons offenses, so that planned category was dropped.
+- **`src/lib/census/hexData.ts`:**
+  - Datasets now carry `kind` (Count or Rate), `ramp`, `source` and `usesCrimeFilter`.
+  - `CrimeFilter` and `RATE_MIN_RESIDENTS` (1,000 / 200 / 50).
+  - `buildHexLayer` now returns `incidents`, `tooFewResidents` and `noData`.
+  - The rate is the cell's total incidents ÷ its total residents at each level.
+  - Quantile bands use non-zero cells only.
+  - New `cellDetails` (hover breakdown) and `formatValue`.
+- **Checks:** 30,816 crimes at every level and 59.4 per 1,000 overall.
+
+## Skills, in order
+1. **react-component:**
+   - `crimeFilter` state, saved to `mini-uber.census.crime-category.v1` and `mini-uber.census.include-non-criminal.v1`.
+   - A Crime type select and a non-criminal switch, shown only for the crime datasets.
+   - A colour ramp per dataset.
+   - Map cells for "too few residents" and "no data".
+   - The hover box shows a status and a breakdown by category.
+   - The legend shows the crime type, placeholder swatches and the rate note.
+   - The top-bar total is formatted by dataset type.
+2. **styling:**
+   - **Crime ramp:** yellow-20 → orange-90 with evenly spaced lightness, reversed on dark basemaps.
+   - **Too few residents:** solid grey.
+   - **No data:** dashed outline.
+   - **Tidying:** the hover box (Status row, divider before the breakdown) and the legend (wrapping title, placeholder row).
+   - **Bug fixed:** the legend items were rendering at body size because of a global rule.
+   - `formatValue` replaces the duplicated formatters.
+
+## Checks
+- `tsc`, `eslint` and `prettier` all pass.
+- In the browser: every dataset and crime type at res 7, 8 and 9 on Positron and Dark, hover on normal, too-few and no-data cells, and switching between datasets back and forth. A fresh tab had no console errors.
+- No changes to simulator files.
+
+## Known rough edges
+- At the default 50% opacity on Positron the top crime band (orange-90) looks dusky mauve. It is still distinct from the band below.
+- At res 9 the top rate band still runs into the thousands, from cells just over the 50-resident cutoff.
+- The crime data is one year; other years can come from `yarn crime --year`.

@@ -3,6 +3,7 @@ import { Inter, Poppins } from 'next/font/google';
 import 'leaflet/dist/leaflet.css';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import '@/app/globals.css';
+import NavRail from '@/components/nav/NavRail';
 
 const inter = Inter({ variable: '--font-inter', subsets: ['latin'] });
 const poppins = Poppins({
@@ -24,7 +25,9 @@ export default function RootLayout({
       <body
         className={`${inter.variable} ${poppins.variable} font-inter antialiased`}
       >
-        {children}
+        <NavRail />
+        {/* Clears the collapsed rail (w-14); the expanded rail overlays. */}
+        <div className="pl-14">{children}</div>
       </body>
     </html>
   );

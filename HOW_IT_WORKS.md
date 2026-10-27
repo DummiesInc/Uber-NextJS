@@ -1,9 +1,12 @@
 # How Mini-Uber works
 
-This app simulates Uber-style ride dispatch on a map of Omaha. This document covers the tools it's built with and the three algorithms behind it:
+This app simulates Uber-style ride dispatch on a map of Omaha, and has a second page (`/census`) that maps census population onto the same hexagons. A rail on the left switches between them. This document covers the tools it's built with and the algorithms behind it:
 - finding nearby cars
 - route finding
 - drivers moving toward demand
+- the H3 hierarchy on the map
+- turning census block groups into hexagons
+- police incidents and crime rates on hexagons
 
 Everything runs in the browser except the optional Claude call.
 
@@ -26,6 +29,11 @@ Everything runs in the browser except the optional Claude call.
 ### Roads and routes
 - **[OSRM](https://project-osrm.org) public demo server:** real turn-by-turn road routes for the rider's trip and for a driver heading to a pickup.
 - **Built-in road graph:** about 1.2 MB of Omaha's main roads, stored in `src/lib/sim/data/roads.json`. It was taken once from **OpenStreetMap** with the **Overpass API**, and `yarn roads` rebuilds it. Roaming cars drive on it.
+
+### Census data
+- **[TIGERweb](https://tigerweb.geo.census.gov) (U.S. Census Bureau):** the Bureau's public map service. Its 2020 Census block-group layer comes with each group's population (`POP100`) and housing-unit count (`HU100`), so one request returns both the shapes and the numbers, with no API key. `yarn census` downloads it once into `src/lib/census/data/`.
+- **[Omaha Police Department incident data](https://police.cityofomaha.org/crime-information/incident-data-download):** a public CSV for each year from 2015 onward, with one row per offense. Each row has a block-level latitude and longitude. `yarn crime` downloads 2025 into `src/lib/census/data/crime2025.json`; `--year` picks another year.
+- **The Census data API** (api.census.gov), where American Community Survey figures such as income and age live, now requires a free key. It isn't used yet.
 
 ### UI and styling
 - **Tailwind CSS 4:** with the design tokens in `src/app/globals.css`. `clsx` and `tailwind-merge` sit behind the `cn()` helper, and `tw-animate-css` provides animations.
@@ -152,3 +160,53 @@ Code: `cellsAtLevel`, `total` and `intensity` in [`src/lib/sim/heat.ts`](src/lib
 - **Sum, not average:** a parent full of busy streets should outrank one with a single hot corner. An average would make them look the same.
 - **Colour:** set by the cell's **share of the busiest cell at that level** (`intensity`), so the most important area is the darkest at every zoom. Otherwise totals at res 7 (up to about 18) would dwarf res-9 values (0–1).
 - **Painting:** the brush works at the level on screen. A dab on a res-7 cell raises all of its roughly 40–49 res-9 children at once.
+
+## 5. Census block groups to hexagons
+
+Code: [`scripts/build-census.mjs`](scripts/build-census.mjs) and [`src/lib/census/hexData.ts`](src/lib/census/hexData.ts). The page is in [`src/components/census/`](src/components/census/).
+
+### The source
+- **Block groups:** the smallest areas the Census Bureau publishes detailed counts for, usually 600 to 3,000 people. They follow streets, rivers and other boundaries, so their shapes and sizes vary a lot.
+- **This area:** 470 block groups touch the simulator's area. 438 are in Douglas County, NE and 32 in Pottawattamie County, IA (Council Bluffs). Together they hold 549,436 people (2020 Census).
+
+### Moving the counts onto hexagons
+1. **Assign cells:** `polygonToCells` gives every res-9 hexagon whose centre falls inside a block group. Each hexagon belongs to exactly one block group.
+2. **Split evenly:** a block group's population is divided equally among its hexagons. This assumes people are spread evenly within a block group, a standard method called areal weighting.
+3. **Tiny block groups:** any block group too small to contain a hexagon centre would give all its people to the hexagon at its centre point. None of the 470 needed it.
+4. **Roll up:** res-8 and res-7 values are sums of their res-9 children, as with demand on the simulator.
+5. **Check:** the total is 549,436 at every level. That is 7,424 hexes at res 9, 1,135 at res 8 and 187 at res 7.
+
+Whole block groups are kept, even where they extend past the simulator's box, so the hex grid reaches a little further than the simulator's.
+
+### Showing it
+- **Colour bands (default):** 5 bands with an equal number of hexes in each (quantiles), worked out separately at each level. Population is very uneven, so a straight scale would leave most of the city pale.
+- **Other scales:** Linear and Square root are also offered.
+- **Ramp:** light mint to deep blue. It is reversed on dark basemaps so that busy areas glow.
+- **Hover:** shows a hex's people, its band, its share of the busiest hex, and the block groups its people came from.
+- **Block-group outlines:** can be drawn over the hexes to compare the census's own shapes with the grid.
+
+## 6. Police incidents and crime rates
+
+Code: [`scripts/build-crime.mjs`](scripts/build-crime.mjs), and `buildHexLayer` and `cellDetails` in [`src/lib/census/hexData.ts`](src/lib/census/hexData.ts)
+
+### From offense rows to hexagons
+- **Cases, not rows:** the 2025 file has 45,191 offense rows, which make up 39,298 cases (case numbers). A case with several offenses counts once overall, and once in each category it touches.
+- **Locations:** OPD rounds each location to the block (e.g. "900 Jones St"). `latLngToCell` turns that point straight into a res-9 hexagon, so no splitting is needed, unlike block groups.
+- **Dropped:** 733 cases have no location and 856 fall outside the census page's hexagons. That leaves 37,709.
+- **Categories,** matched on the offense description:
+  - **Violent:** homicide, assault, robbery, sexual assault, kidnapping, intimidation, terroristic threats
+  - **Property:** theft, shoplifting, motor vehicle theft, burglary, vandalism, arson, fraud
+  - **Other offenses:** trespass, harassment, protection orders, child neglect and similar
+  - **Non-criminal calls:** sickness, overdoses, deaths, injuries, lost property. These are left out of "All crimes" unless the switch is on.
+  - The 2025 file has no drug or weapons offenses.
+- **Check:** the script stops if the hexagon totals don't equal the number of cases kept. For All crimes that is 30,816 at every level.
+
+### Counts vs rates
+- **Incidents:** counts that add up from res 9 to res 8 and res 7, like population.
+- **Incidents per 1,000 residents:** at each level this is 1,000 × the cell's total incidents ÷ the cell's total residents. Both totals are summed first, because rates don't add up the way counts do. Across Omaha it comes to 59.4 per 1,000 for All crimes.
+- **Minimum residents:** a cell needs at least 50 residents at res 9, 200 at res 8 or 1,000 at res 7 to show a rate.
+  - Below that it's drawn as "too few residents". A mall or downtown block with a handful of residents and hundreds of thefts would otherwise top the scale.
+  - Even with the cutoff, the top band at res 9 runs into the thousands.
+- **Years differ:** the rate divides 2025 incidents by 2020 residents.
+- **Coverage:** OPD only covers Douglas County, NE. Council Bluffs hexagons show as "no data", not zero.
+- **Colour bands:** crime-free cells would fill the lowest bands with "0–0", so the bands are computed over non-zero cells only and zero goes in the first band.
