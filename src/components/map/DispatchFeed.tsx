@@ -1,6 +1,7 @@
 'use client';
 
 import { useRef, useState, type ReactNode } from 'react';
+import { placeLabel } from '@/lib/utils';
 import { MAX_K } from '@/lib/sim/config';
 import type { SimEvent } from '@/lib/sim/events';
 import type { Route } from '@/lib/sim/types';
@@ -55,7 +56,7 @@ function describeFeedEvent(event: SimEvent): FeedMessage | null {
         tone: FeedTone.Info,
         message: (
           <>
-            📍 Rider placed at <b>{event.place.name}</b> → H3 cell{' '}
+            📍 Rider placed at <b>{placeLabel(event.place)}</b> → H3 cell{' '}
             <code>{shortCell(event.cell)}</code>
           </>
         )
@@ -144,7 +145,7 @@ function describeFeedEvent(event: SimEvent): FeedMessage | null {
     case 'driver_arrived':
       return {
         tone: FeedTone.Good,
-        message: `📍 ${event.driver.name} arrived at ${event.ride.pickup.name}`
+        message: `📍 ${event.driver.name} arrived at ${placeLabel(event.ride.pickup)}`
       };
     case 'picked_up':
       return {

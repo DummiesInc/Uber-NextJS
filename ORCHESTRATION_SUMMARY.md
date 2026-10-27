@@ -112,3 +112,42 @@ Add a setting to `ControlsProvider` if it needs one. Then write a section compon
 ## Follow-ups
 - The 16rem drawer width is hard-coded in three places (`w-64` plus the Stepper and Legend offsets).
 - At phone widths the fixed 390px phone frame makes the page scroll sideways. This was already the case before this run.
+
+# Run 4: pin-drop pickup
+
+The rider can now pick up from anywhere in the service area by dropping a pin on the phone map. At the user's request it is pin drop only: no address search, no geocoding service, no API route, and no clicking on the god map. The engine is unchanged, since `App.selectPickup` already takes any `Place`.
+
+## Skills, in order
+1. **react-component:**
+   - **New phone screen:** `PhoneScreen.PickupPin`, shown by `PickupPinScreen.tsx`, with a "Choose on map" entry on the pickup screen.
+   - **PhoneMap:**
+     - `isPinMode` and `onPinCenterChange` props.
+     - In pin mode the map grows and a fixed centre pin overlay appears.
+     - The center is reported on `moveend`.
+     - A ResizeObserver calls `invalidateSize`.
+     - `fitAll` is paused while the rider is aiming.
+     - All view changes are non-animated, to keep the StrictMode fix.
+   - **Confirming:** builds `{ name: 'Dropped pin', area: 'near <nearest LOCATIONS place>' }` and uses the same path as a listed place. Confirm is turned off outside the service area.
+   - **`placeLabel()` in `src/lib/utils.ts`:** used for the pickup name in the options and en-route screens and in the dispatch feed.
+2. **styling:**
+   - **Pin accuracy:** the sheet no longer overlaps the map in pin mode, and the pin's tip and ground dot sit on the map centre. Measured: within 0.7px, down from about 12px.
+   - **Pin:** a drop shadow, and it lifts while the map is dragged (CSS only, via `.leaflet-dragging`).
+   - **Confirm bar:** a "Pickup" eyebrow, a title and "near X". The out-of-service state is shown in orange.
+   - **Entry row:** "Choose on map" is now a separate card.
+   - **Options header:** shows the area as muted text.
+   - **Zoom:** pin mode opens at zoom 14.
+
+## Fix made during final verification
+- Reopening pin mode showed the previous pin's label, because the stored pin position wasn't reset. `PinModeOpened` now resets `pinCenter` to `MAP_CENTER`, where the map opens.
+
+## Checks
+- `tsc`, `eslint` and `prettier --check` pass.
+- In the browser:
+  - A real mouse drag updates the label once the map settles, and the label matches the confirmed pickup.
+  - A full ride from a dropped pin (near Oak View Mall) went pickup → options → matching → en route → arrived → trip → completed.
+  - Listed places still work.
+  - No console errors.
+
+## Token gaps
+- There is no light error or warning surface token; the out-of-service box uses `bg-orange-5`.
+- There is no light divider token; `border-gray-10` is used, matching the list rows.

@@ -1,4 +1,5 @@
 import If from '@/lib/If';
+import { placeLabel } from '@/lib/utils';
 import type { Driver } from '@/lib/sim/driver';
 import type { Ride } from '@/lib/sim/types';
 import Button from '@/components/atoms/Button';
@@ -36,7 +37,7 @@ export default function EnRouteScreen({
       <div className="live-eta mb-fluid-2xs min-h-fixed-2xl text-fluid-m">
         <If
           condition={driverArrived}
-          then={`Meet ${driver.name} at ${ride.pickup.name}`}
+          then={`Meet ${driver.name} at ${placeLabel(ride.pickup)}`}
           else={
             <If condition={liveTrip}>
               Arriving in <b>{liveTrip?.minutes} min</b> ·{' '}

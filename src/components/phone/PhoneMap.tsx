@@ -2,7 +2,10 @@
 
 import { useEffect, useRef } from 'react';
 import L from 'leaflet';
-import { DESTINATION } from '@/lib/sim/config';
+import { MapPin } from 'lucide-react';
+import { cn } from '@/lib/utils';
+import If from '@/lib/If';
+import { DESTINATION, MAP_CENTER } from '@/lib/sim/config';
 import { LOCATIONS } from '@/lib/sim/data/locations';
 import type { Driver } from '@/lib/sim/driver';
 import type { SimEvent } from '@/lib/sim/events';
@@ -17,10 +20,29 @@ import { useSimulation } from '@/components/providers/SimulationProvider';
 
 const ll = (point: LatLng): L.LatLngTuple => [point.lat, point.lng];
 
-/** The phone's own small Leaflet map, driven entirely by bus events. */
-export default function PhoneMap() {
+const PIN_START_ZOOM: number = 14;
+
+interface PhoneMapProps {
+  isPinMode: boolean;
+  onPinCenterChange: (center: LatLng) => void;
+}
+
+/** The phone's own Leaflet map, driven by bus events; grows in pin mode so the rider can aim. */
+export default function PhoneMap({
+  isPinMode,
+  onPinCenterChange
+}: PhoneMapProps) {
   const { app, bus, registerFrame } = useSimulation();
   const mapElRef = useRef<HTMLDivElement>(null);
+  const mapRef = useRef<L.Map | null>(null);
+  const fitAllRef = useRef<((animate?: boolean) => void) | null>(null);
+  const isPinModeRef = useRef<boolean>(isPinMode);
+  const onPinCenterChangeRef =
+    useRef<(center: LatLng) => void>(onPinCenterChange);
+
+  useEffect(() => {
+    onPinCenterChangeRef.current = onPinCenterChange;
+  });
 
   useEffect(() => {
     const mapEl: HTMLDivElement | null = mapElRef.current;
@@ -49,7 +71,9 @@ export default function PhoneMap() {
     routeLine.addTo(map);
     pickupLine.addTo(map);
 
+    // Bus-driven fits never move the map while the rider is aiming the pin.
     const fitAll = (animate: boolean = true) => {
+      if (isPinModeRef.current) return;
       const points: L.LatLngTuple[] = [ll(DESTINATION)];
       if (app.pickup) points.push(ll(app.pickup));
       else points.push(...LOCATIONS.map(ll));
@@ -74,6 +98,20 @@ export default function PhoneMap() {
     // No zoom animation on mount: StrictMode removes the map straight away, and
     // Leaflet's zoom-end timer would then fire on a removed map.
     fitAll(false);
+    mapRef.current = map;
+    fitAllRef.current = fitAll;
+
+    map.on('moveend', () => {
+      if (!isPinModeRef.current) return;
+      const center: L.LatLng = map.getCenter();
+      onPinCenterChangeRef.current({ lat: center.lat, lng: center.lng });
+    });
+
+    // Keeps Leaflet in sync when the container grows/shrinks with pin mode.
+    const resizeObserver: ResizeObserver = new ResizeObserver(() =>
+      map.invalidateSize()
+    );
+    resizeObserver.observe(mapEl);
 
     const unsubscribeBus = bus.on((event: SimEvent) => {
       switch (event.type) {
@@ -137,11 +175,48 @@ export default function PhoneMap() {
     });
 
     return () => {
+      resizeObserver.disconnect();
       unsubscribeBus();
       unregisterFrame();
+      mapRef.current = null;
+      fitAllRef.current = null;
       map.remove();
     };
   }, [app, bus, registerFrame]);
 
-  return <div ref={mapElRef} className="phone-map shrink-0 basis-[34%]" />;
+  // Runs after the layout change commits, so invalidateSize sees the new size.
+  // Views are set without animation so a StrictMode remount can't hit a mid-zoom map.
+  useEffect(() => {
+    isPinModeRef.current = isPinMode;
+    const map: L.Map | null = mapRef.current;
+    if (!map) return;
+    map.invalidateSize();
+    if (isPinMode)
+      map.setView(ll(MAP_CENTER), PIN_START_ZOOM, { animate: false });
+    else fitAllRef.current?.(false);
+  }, [isPinMode]);
+
+  return (
+    <div
+      className={cn(
+        'phone-map-wrap relative shrink-0 basis-[34%]',
+        isPinMode && 'min-h-0 flex-1 basis-auto'
+      )}
+    >
+      <div ref={mapElRef} className="phone-map absolute inset-0" />
+      <If condition={isPinMode}>
+        <div className="pin-overlay pointer-events-none absolute inset-0 z-[700]">
+          {/* Ground dot: marks the exact map center that becomes the pickup. */}
+          <span className="pin-overlay-dot absolute top-1/2 left-1/2 size-1.5 -translate-1/2 rounded-full bg-surface-alternate ring-2 ring-surface-primary/80" />
+          {/* Bottom edge on the center, nudged down 1/24 so the stroked tip
+              (y≈23 of lucide's 24-unit box) lands on it; lifts while dragging. */}
+          <MapPin
+            className="pin-overlay-icon absolute bottom-1/2 left-1/2 size-9 -translate-x-1/2 translate-y-1/24 fill-surface-alternate text-fg-alternate drop-shadow-md transition-transform duration-150 ease-out in-[.leaflet-dragging]:-translate-y-1/4"
+            strokeWidth={1.5}
+            aria-hidden
+          />
+        </div>
+      </If>
+    </div>
+  );
 }

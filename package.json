@@ -8,7 +8,7 @@
     "start": "next start -p 4000",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
-    "format": "prettier --write src",
+    "format": "prettier --write \"./**/*.{ts,tsx,js,jsx,json}\" --config ./.prettierrc",
     "roads": "node scripts/build-roads.mjs",
     "postinstall": "node -e \"require('fs').copyFileSync('node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs','public/maplibre-gl-worker.mjs')\""
   },

@@ -1,4 +1,4 @@
-import { ChevronRight, Lock, MapPin, Shuffle } from 'lucide-react';
+import { ChevronRight, Crosshair, Lock, MapPin, Shuffle } from 'lucide-react';
 import { DESTINATION } from '@/lib/sim/config';
 import { LOCATIONS } from '@/lib/sim/data/locations';
 import { haversine } from '@/lib/sim/geo';
@@ -8,13 +8,15 @@ import type { PhoneState } from '@/components/phone/Phone';
 interface PickupScreenProps extends Pick<PhoneState, 'places'> {
   onChoosePlace: (place: Place) => void;
   onShuffle: () => void;
+  onChooseOnMap: () => void;
 }
 
 /** First screen: pick one of five pickup spots; the destination is fixed. */
 export default function PickupScreen({
   places,
   onChoosePlace,
-  onShuffle
+  onShuffle,
+  onChooseOnMap
 }: PickupScreenProps) {
   return (
     <>
@@ -40,6 +42,22 @@ export default function PickupScreen({
           </span>
         </div>
       </div>
+      <button
+        type="button"
+        className="choose-on-map mb-fixed-2xs flex w-full cursor-pointer items-center gap-fixed-xs rounded-fluid-xs border border-gray-10 px-fixed-2xs py-fixed-2xs text-left leading-snug text-fg-primary hover:bg-surface-secondary"
+        onClick={onChooseOnMap}
+      >
+        <span className="pin grid size-fixed-6xl flex-none place-items-center rounded-full bg-surface-alternate text-fg-alternate">
+          <Crosshair className="size-4" aria-hidden />
+        </span>
+        <span className="flex-1">
+          <b>Choose on map</b>
+          <small className="block text-fluid-xs text-fg-secondary">
+            Drop a pin at your exact spot
+          </small>
+        </span>
+        <ChevronRight className="chev size-5 text-gray-30" aria-hidden />
+      </button>
       <ul className="places">
         {places.map((place: Place) => (
           <li key={place.name} className="text-fluid-s leading-snug">

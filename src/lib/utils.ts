@@ -1,3 +1,4 @@
+import type { Place } from '@/lib/sim/types';
 import { clsx, type ClassValue } from 'clsx';
 import { extendTailwindMerge } from 'tailwind-merge';
 
@@ -27,4 +28,11 @@ const twMerge = extendTailwindMerge({
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
+}
+
+/** Pickup name with its area, e.g. "Dropped pin (near Old Market)"; skips an area that repeats the name. */
+export function placeLabel(place: Place): string {
+  return place.area === place.name
+    ? place.name
+    : `${place.name} (${place.area})`;
 }

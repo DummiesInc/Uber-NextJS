@@ -2,19 +2,21 @@
 
 import { useEffect, useReducer, useRef, useState, type ReactNode } from 'react';
 import { BatteryFull, Signal } from 'lucide-react';
-import { OFFER_TIMEOUT_MS } from '@/lib/sim/config';
+import { cn } from '@/lib/utils';
+import { MAP_CENTER, OFFER_TIMEOUT_MS } from '@/lib/sim/config';
 import { randomPlaces } from '@/lib/sim/data/locations';
 import type { Quote } from '@/lib/sim/dispatch';
 import type { Driver } from '@/lib/sim/driver';
 import type { OfferOutcome, SimEvent } from '@/lib/sim/events';
 import type { PathFollower } from '@/lib/sim/geo';
-import type { Category, Place, Ride } from '@/lib/sim/types';
+import type { Category, LatLng, Place, Ride } from '@/lib/sim/types';
 import {
   useSimEvent,
   useSimulation
 } from '@/components/providers/SimulationProvider';
 import PhoneMap from '@/components/phone/PhoneMap';
 import PickupScreen from '@/components/phone/PickupScreen';
+import PickupPinScreen from '@/components/phone/PickupPinScreen';
 import OptionsScreen from '@/components/phone/OptionsScreen';
 import MatchingScreen from '@/components/phone/MatchingScreen';
 import EnRouteScreen from '@/components/phone/EnRouteScreen';
@@ -23,6 +25,7 @@ import DoneScreen from '@/components/phone/DoneScreen';
 
 export enum PhoneScreen {
   Pickup = 'pickup',
+  PickupPin = 'pickupPin',
   Options = 'options',
   Matching = 'matching',
   EnRoute = 'enroute',
@@ -53,6 +56,8 @@ export interface LiveTripProgress {
 export interface PhoneState {
   screen: PhoneScreen;
   places: Place[];
+  /** Map center under the pin while choosing a pickup on the map. */
+  pinCenter: LatLng;
   selected: Category;
   quotes: Quote[];
   loadingRoute: boolean;
@@ -69,6 +74,8 @@ enum PhoneActionType {
   RouteLoaded = 'routeLoaded',
   QuotesRefreshed = 'quotesRefreshed',
   PlacesShuffled = 'placesShuffled',
+  PinModeOpened = 'pinModeOpened',
+  PinMoved = 'pinMoved',
   BackToPickup = 'backToPickup',
   CategorySelected = 'categorySelected',
   RideRequestStarted = 'rideRequestStarted',
@@ -90,6 +97,8 @@ type PhoneAction =
   | { type: PhoneActionType.RouteLoaded; quotes: Quote[] }
   | { type: PhoneActionType.QuotesRefreshed; quotes: Quote[] }
   | { type: PhoneActionType.PlacesShuffled; places: Place[] }
+  | { type: PhoneActionType.PinModeOpened }
+  | { type: PhoneActionType.PinMoved; center: LatLng }
   | { type: PhoneActionType.BackToPickup }
   | { type: PhoneActionType.CategorySelected; category: Category }
   | { type: PhoneActionType.RideRequestStarted }
@@ -112,6 +121,7 @@ function createInitialPhoneState(): PhoneState {
   return {
     screen: PhoneScreen.Pickup,
     places: randomPlaces(5),
+    pinCenter: MAP_CENTER,
     selected: 'UberX',
     quotes: [],
     loadingRoute: false,
@@ -156,6 +166,11 @@ function phoneReducer(state: PhoneState, action: PhoneAction): PhoneState {
       return { ...state, quotes: action.quotes };
     case PhoneActionType.PlacesShuffled:
       return { ...state, places: action.places };
+    case PhoneActionType.PinModeOpened:
+      // PhoneMap opens pin mode at MAP_CENTER, so the label starts there too.
+      return { ...state, screen: PhoneScreen.PickupPin, pinCenter: MAP_CENTER };
+    case PhoneActionType.PinMoved:
+      return { ...state, pinCenter: action.center };
     case PhoneActionType.BackToPickup:
       return { ...state, screen: PhoneScreen.Pickup };
     case PhoneActionType.CategorySelected:
@@ -350,6 +365,18 @@ export default function Phone() {
               places: randomPlaces(5, phoneState.places)
             })
           }
+          onChooseOnMap={() =>
+            dispatch({ type: PhoneActionType.PinModeOpened })
+          }
+        />
+      );
+      break;
+    case PhoneScreen.PickupPin:
+      sheetContent = (
+        <PickupPinScreen
+          center={phoneState.pinCenter}
+          onConfirm={(place: Place) => void handleChoosePlace(place)}
+          onBack={() => dispatch({ type: PhoneActionType.BackToPickup })}
         />
       );
       break;
@@ -433,9 +460,19 @@ export default function Phone() {
           <BatteryFull className="size-4" aria-hidden />
         </span>
       </div>
-      <PhoneMap />
+      <PhoneMap
+        isPinMode={screen === PhoneScreen.PickupPin}
+        onPinCenterChange={(center: LatLng) =>
+          dispatch({ type: PhoneActionType.PinMoved, center })
+        }
+      />
       <div
-        className="sheet relative z-[800] -mt-fixed-l min-h-0 flex-1 overflow-auto rounded-t-fluid-s bg-surface-primary px-fixed-l pt-fixed-m pb-fixed-xl text-fluid-s shadow-[0_-6px_18px_rgb(0_0_0/0.12)] before:mx-auto before:-mt-1.5 before:mb-fixed-2xs before:block before:h-1.25 before:w-10 before:rounded-full before:bg-gray-20"
+        className={cn(
+          'sheet relative z-[800] -mt-fixed-l min-h-0 flex-1 overflow-auto rounded-t-fluid-s bg-surface-primary px-fixed-l pt-fixed-m pb-fixed-xl text-fluid-s shadow-[0_-6px_18px_rgb(0_0_0/0.12)] before:mx-auto before:-mt-1.5 before:mb-fixed-2xs before:block before:h-1.25 before:w-10 before:rounded-full before:bg-gray-20',
+          // No overlap in pin mode: the visible map must equal the Leaflet
+          // container so the pin over its center is what gets picked.
+          screen === PhoneScreen.PickupPin && 'mt-0 flex-none'
+        )}
         data-screen={screen}
       >
         {sheetContent}

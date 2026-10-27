@@ -59,7 +59,11 @@ export default function OptionsScreen({
         <h2 className="text-fluid-l">Choose a ride</h2>
       </div>
       <div className="trip-line my-fixed-2xs">
-        <b>{pickup?.name ?? ''}</b> → <b>{DESTINATION.name}</b>
+        <b>{pickup?.name}</b>
+        <If condition={pickup && pickup.area !== pickup.name}>
+          <span className="text-fg-secondary"> · {pickup?.area}</span>
+        </If>{' '}
+        → <b>{DESTINATION.name}</b>
         <small className="block text-fluid-xs text-fg-secondary">
           {tripSummary}
         </small>
