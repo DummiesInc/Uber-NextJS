@@ -1,4 +1,4 @@
-import { cellToParent, getResolution } from 'h3-js';
+import { cellToParent, getHexagonAreaAvg, getResolution, UNITS } from 'h3-js';
 import blockGroupData from '@/lib/census/data/blockGroups.json';
 import crimeData from '@/lib/census/data/crime2025.json';
 
@@ -93,6 +93,10 @@ export interface CensusDataset {
   source: string;
   /** Whether the crime category filter applies. */
   usesCrimeFilter: boolean;
+  /** Legend heading in plain words, e.g. "People per hexagon". */
+  legendTitle: string;
+  /** Low and high ends of the colour scale, e.g. "Fewest people". */
+  scaleEnds: [string, string];
 }
 
 /** The datasets the census page can show; add entries here to extend it. */
@@ -104,7 +108,9 @@ export const CENSUS_DATASETS: CensusDataset[] = [
     ramp: CensusRamp.Population,
     unit: ['person', 'people'],
     source: 'Source: 2020 Census, U.S. Census Bureau',
-    usesCrimeFilter: false
+    usesCrimeFilter: false,
+    legendTitle: 'People per hexagon',
+    scaleEnds: ['Fewest people', 'Most people']
   },
   {
     id: CensusDatasetId.Crime,
@@ -113,7 +119,9 @@ export const CENSUS_DATASETS: CensusDataset[] = [
     ramp: CensusRamp.Crime,
     unit: ['incident', 'incidents'],
     source: `Source: Omaha Police Department, ${CRIME_YEAR}`,
-    usesCrimeFilter: true
+    usesCrimeFilter: true,
+    legendTitle: 'Police incidents per hexagon',
+    scaleEnds: ['Fewest incidents', 'Most incidents']
   },
   {
     id: CensusDatasetId.CrimeRate,
@@ -122,7 +130,9 @@ export const CENSUS_DATASETS: CensusDataset[] = [
     ramp: CensusRamp.Crime,
     unit: ['per 1,000 residents', 'per 1,000 residents'],
     source: `Sources: Omaha Police Department ${CRIME_YEAR}; 2020 Census`,
-    usesCrimeFilter: true
+    usesCrimeFilter: true,
+    legendTitle: 'Police incidents per 1,000 residents',
+    scaleEnds: ['Lowest rate', 'Highest rate']
   }
 ];
 
@@ -159,6 +169,43 @@ export interface HexLayer {
   max: Map<CensusLevel, number>;
   /** Count layers: sum over every cell. Rate layers: the overall rate. */
   total: number;
+  /** Every coloured value per level, ascending, for ranking a cell. */
+  sorted: Map<CensusLevel, number[]>;
+}
+
+/** Plain name for each level's hexagons, as the legend and hover box say it. */
+export const CENSUS_LEVEL_LABEL: Record<CensusLevel, string> = {
+  7: 'City',
+  8: 'Neighbourhood',
+  9: 'Street'
+};
+
+/** Average hexagon area per level in km² (each cell's own area varies a little). */
+export const CENSUS_LEVEL_AREA_KM2: Record<CensusLevel, number> = {
+  7: getHexagonAreaAvg(7, UNITS.km2),
+  8: getHexagonAreaAvg(8, UNITS.km2),
+  9: getHexagonAreaAvg(9, UNITS.km2)
+};
+
+/**
+ * Share (0–1) of the level's coloured cells with a lower value than `value`,
+ * so the hover box can say "more than 80% of hexagons".
+ */
+export function rankAtLevel(
+  layer: HexLayer,
+  res: CensusLevel,
+  value: number
+): number {
+  const sorted: number[] = layer.sorted.get(res) ?? [];
+  if (sorted.length === 0) return 0;
+  let lo = 0;
+  let hi = sorted.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (sorted[mid] < value) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo / sorted.length;
 }
 
 const BAND_COUNT = 5;
@@ -298,10 +345,15 @@ export function buildHexLayer(
 
   const breaks = new Map<CensusLevel, number[]>();
   const max = new Map<CensusLevel, number>();
+  const sorted = new Map<CensusLevel, number[]>();
   for (const res of CENSUS_LEVELS) {
     const q = quantileBreaks(values.get(res)!.values());
     breaks.set(res, q.breaks);
     max.set(res, q.max);
+    sorted.set(
+      res,
+      [...values.get(res)!.values()].sort((a: number, b: number) => a - b)
+    );
   }
   return {
     dataset,
@@ -312,7 +364,8 @@ export function buildHexLayer(
     noData,
     breaks,
     max,
-    total
+    total,
+    sorted
   };
 }
 

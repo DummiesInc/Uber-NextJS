@@ -6,6 +6,7 @@ import If from '@/lib/If';
 import { cn } from '@/lib/utils';
 import {
   CENSUS_DATASETS,
+  CENSUS_LEVEL_LABEL,
   CENSUS_LEVELS,
   CRIME_CATEGORY_LABEL,
   CrimeCategory,
@@ -16,7 +17,6 @@ import {
 import { BASEMAPS, type Basemap } from '@/components/map/basemaps';
 import {
   CENSUS_AUTO_LEVEL,
-  CENSUS_LEVEL_NAME,
   CensusColorScale
 } from '@/components/census/censusMapView';
 import {
@@ -162,18 +162,18 @@ export default function CensusControlPanel() {
             </If>
           </If>
           <label className={cn(CONTROL_CLASS, 'whitespace-nowrap')}>
-            Grid level
+            Hexagon size
             <select
               className={cn(SELECT_CLASS, 'min-w-0 tabular-nums')}
               value={String(levelMode)}
               onChange={handleLevelModeChange}
             >
               <option value={CENSUS_AUTO_LEVEL}>
-                Auto · res {currentLevel}
+                Auto · {CENSUS_LEVEL_LABEL[currentLevel].toLowerCase()}
               </option>
               {CENSUS_LEVELS.map((res: CensusLevel) => (
                 <option key={res} value={String(res)}>
-                  Res {res} · {CENSUS_LEVEL_NAME[res]}
+                  {CENSUS_LEVEL_LABEL[res]} (res {res})
                 </option>
               ))}
             </select>

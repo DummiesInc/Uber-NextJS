@@ -27,13 +27,6 @@ export enum CensusColorScale {
   Sqrt = 'sqrt'
 }
 
-/** Matches the Grid level options and the hover box title. */
-export const CENSUS_LEVEL_NAME: Record<CensusLevel, string> = {
-  7: 'city',
-  8: 'neighbourhood',
-  9: 'street'
-};
-
 /**
  * Colour ramps per dataset, low to high on light basemaps, each in roughly
  * even lightness steps. Population runs mint through azure to deep blue
@@ -129,7 +122,7 @@ export const CENSUS_PLACEHOLDER_STYLE: Record<
  * basemap the reversed ramp's bright end only glows with a little more
  * coverage, while its dark end still sinks into the map.
  */
-const CENSUS_THEME_OPACITY: Record<'light' | 'dark', number> = {
+export const CENSUS_THEME_OPACITY: Record<'light' | 'dark', number> = {
   light: 1,
   dark: 1.3
 };

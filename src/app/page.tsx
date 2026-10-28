@@ -5,8 +5,6 @@ import SimulationClient from '@/components/modules/SimulationClient';
 export const dynamic = 'force-dynamic';
 
 export default function Home() {
-  const enableLLM = Boolean(process.env.ANTHROPIC_API_KEY)
-  return (
-    <SimulationClient llmEnabled={false} />
-  );
+  const enableLLM = Boolean(process.env.ANTHROPIC_API_KEY);
+  return <SimulationClient llmEnabled={false} />;
 }

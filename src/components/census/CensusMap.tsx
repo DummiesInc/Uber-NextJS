@@ -83,7 +83,7 @@ export default function CensusMap() {
   return (
     <>
       <div ref={mapElRef} className="census-map absolute inset-0" />
-      <CensusHoverBox cellHover={cellHover} dataset={hexLayer.dataset} />
+      <CensusHoverBox cellHover={cellHover} hexLayer={hexLayer} />
     </>
   );
 }
