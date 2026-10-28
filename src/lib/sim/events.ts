@@ -42,15 +42,23 @@ export type SimEvent =
 type Handler = (e: SimEvent) => void;
 
 /** One stream that the map, the dispatch feed and the phone all subscribe to. */
-export class EventBus {
-  private handlers = new Set<Handler>();
+export interface EventBus {
+  /** Subscribe; returns an unsubscribe function. */
+  on: (handler: Handler) => () => void;
+  emit: (event: SimEvent) => void;
+}
 
-  on(handler: Handler): () => void {
-    this.handlers.add(handler);
-    return () => this.handlers.delete(handler);
-  }
-
-  emit(event: SimEvent): void {
-    for (const h of this.handlers) h(event);
-  }
+export function createEventBus(): EventBus {
+  const handlers = new Set<Handler>();
+  return {
+    on(handler) {
+      handlers.add(handler);
+      return () => {
+        handlers.delete(handler);
+      };
+    },
+    emit(event) {
+      for (const h of handlers) h(event);
+    }
+  };
 }

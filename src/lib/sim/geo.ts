@@ -20,54 +20,62 @@ export function bearing(a: LatLng, b: LatLng): number {
   return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
 }
 
-/** Moves a point along a polyline over a fixed (simulated) duration. */
-export class PathFollower {
-  private cum: number[] = [0];
+/** A polyline driven over a fixed (simulated) duration. */
+export interface Path {
+  readonly points: LatLng[];
+  readonly durationS: number;
+  /** Total length in meters. */
   readonly length: number;
-
-  constructor(
-    readonly points: LatLng[],
-    readonly durationS: number
-  ) {
-    for (let i = 1; i < points.length; i++) {
-      this.cum.push(this.cum[i - 1] + haversine(points[i - 1], points[i]));
-    }
-    this.length = this.cum[this.cum.length - 1];
-  }
-
-  /** Position and heading after `elapsedS` simulated seconds. */
-  at(elapsedS: number): { pos: LatLng; heading: number; done: boolean } {
-    const pts = this.points;
-    if (pts.length < 2 || this.length === 0) {
-      return { pos: pts[pts.length - 1], heading: 0, done: true };
-    }
-    const t = Math.min(
-      1,
-      Math.max(0, elapsedS / Math.max(this.durationS, 0.001))
-    );
-    const target = t * this.length;
-    let i = 1;
-    while (i < this.cum.length - 1 && this.cum[i] < target) i++;
-    const segLen = this.cum[i] - this.cum[i - 1] || 1;
-    const f = (target - this.cum[i - 1]) / segLen;
-    const a = pts[i - 1];
-    const b = pts[i];
-    return {
-      pos: {
-        lat: a.lat + (b.lat - a.lat) * f,
-        lng: a.lng + (b.lng - a.lng) * f
-      },
-      heading: bearing(a, b),
-      done: t >= 1
-    };
-  }
-
-  remainingS(elapsedS: number): number {
-    return Math.max(0, this.durationS - elapsedS);
-  }
-
-  remainingM(elapsedS: number): number {
-    const t = Math.min(1, elapsedS / Math.max(this.durationS, 0.001));
-    return this.length * (1 - t);
-  }
+  /** Distance from the start to each point, precomputed for `pathAt`. */
+  readonly cumulative: number[];
 }
+
+export function createPath(points: LatLng[], durationS: number): Path {
+  const cumulative: number[] = [0];
+  for (let i = 1; i < points.length; i++) {
+    cumulative.push(cumulative[i - 1] + haversine(points[i - 1], points[i]));
+  }
+  return {
+    points,
+    durationS,
+    length: cumulative[cumulative.length - 1],
+    cumulative
+  };
+}
+
+const progress = (path: Path, elapsedS: number): number =>
+  Math.min(1, Math.max(0, elapsedS / Math.max(path.durationS, 0.001)));
+
+/** Position and heading after `elapsedS` simulated seconds. */
+export function pathAt(
+  path: Path,
+  elapsedS: number
+): { pos: LatLng; heading: number; done: boolean } {
+  const pts = path.points;
+  const cum = path.cumulative;
+  if (pts.length < 2 || path.length === 0) {
+    return { pos: pts[pts.length - 1], heading: 0, done: true };
+  }
+  const t = progress(path, elapsedS);
+  const target = t * path.length;
+  let i = 1;
+  while (i < cum.length - 1 && cum[i] < target) i++;
+  const segLen = cum[i] - cum[i - 1] || 1;
+  const f = (target - cum[i - 1]) / segLen;
+  const a = pts[i - 1];
+  const b = pts[i];
+  return {
+    pos: {
+      lat: a.lat + (b.lat - a.lat) * f,
+      lng: a.lng + (b.lng - a.lng) * f
+    },
+    heading: bearing(a, b),
+    done: t >= 1
+  };
+}
+
+export const pathRemainingS = (path: Path, elapsedS: number): number =>
+  Math.max(0, path.durationS - elapsedS);
+
+export const pathRemainingM = (path: Path, elapsedS: number): number =>
+  path.length * (1 - Math.min(1, elapsedS / Math.max(path.durationS, 0.001)));

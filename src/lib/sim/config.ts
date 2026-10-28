@@ -29,6 +29,13 @@ export const OFFER_TIMEOUT_MS = 15_000;
 export const MAX_K = 10;
 /** Pause between ring expansions so the search is visible on the map. */
 export const RING_STEP_MS = 350;
+/** How long the god map takes to fly to the rider when a ride is requested. */
+export const REQUEST_FLY_MS = 800;
+/**
+ * Wait before the first ring so the map has landed on the rider: rings drawn
+ * mid-flight are placed against the moving view and jump when it settles.
+ */
+export const SEARCH_START_DELAY_MS = REQUEST_FLY_MS + 150;
 export const RETRY_MS = 4_000;
 
 export const DEFAULT_DRIVER_COUNT = 30;

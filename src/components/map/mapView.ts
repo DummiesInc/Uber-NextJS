@@ -12,7 +12,8 @@ import {
   H3_RES,
   MAP_CENTER,
   MAP_ZOOM,
-  OFFER_TIMEOUT_MS
+  OFFER_TIMEOUT_MS,
+  REQUEST_FLY_MS
 } from '@/lib/sim/config';
 import type { EventBus } from '@/lib/sim/events';
 import type { Driver } from '@/lib/sim/driver';
@@ -298,280 +299,291 @@ function heatStyle(
   };
 }
 
-export class MapView {
+/** The god map's imperative Leaflet layer; GodMap owns one per mount. */
+export interface MapView {
   readonly map: L.Map;
+  destroy: () => void;
+  setGridVisible: (isVisible: boolean) => void;
+  setHeatVisible: (isVisible: boolean) => void;
+  setParentOutlinesVisible: (isVisible: boolean) => void;
+  setLevelMode: (mode: LevelMode) => void;
+  /** Switch the heat editing tool; any active tool disables map dragging. */
+  setHeatBrush: (brush: HeatBrush) => void;
+  /** Called every animation frame. */
+  frame: (now: number) => void;
+  /** Swap the tile layer and restyle the grid and heat for its theme. */
+  setBasemap: (basemap: Basemap) => void;
+}
+
+export function createMapView(
+  el: HTMLElement,
+  world: World,
+  bus: EventBus,
+  callbacks: MapViewCallbacks
+): MapView {
   /** Canvas renderer per level pane, keyed by pane name. */
-  private renderers = new Map<string, L.Canvas>();
-  private levels = new Map<HeatLevel, LevelLayers>();
-  private levelMode: LevelMode = AUTO_LEVEL_MODE;
-  private level: HeatLevel = levelForZoom(MAP_ZOOM);
+  const renderers = new Map<string, L.Canvas>();
+  const levels = new Map<HeatLevel, LevelLayers>();
+  let levelMode: LevelMode = AUTO_LEVEL_MODE;
+  let level: HeatLevel = levelForZoom(MAP_ZOOM);
   /** Busiest res-9 value at the last restyle; a change restyles every cell. */
-  private lastHeatMax: number = -1;
-  private outlineStyle: L.PathOptions = {};
-  private parentOutlineStyle: L.PathOptions = {};
+  let lastHeatMax: number = -1;
+  let outlineStyle: L.PathOptions = {};
+  let parentOutlineStyle: L.PathOptions = {};
   /** Mirrors `.theme-dark` on the container; heat opacity depends on it. */
-  private isDarkBasemap: boolean = false;
-  private heatBrush: HeatBrush = {
+  let isDarkBasemap: boolean = false;
+  let heatBrush: HeatBrush = {
     tool: HeatTool.None,
     rings: 1,
     strength: 0.2
   };
-  private brushHex: L.Polygon | null = null;
-  private brushCell: string | null = null;
+  let brushHex: L.Polygon | null = null;
+  let brushCell: string | null = null;
   /** Last cell painted in the current stroke, or null when not stroking. */
-  private strokeCell: string | null = null;
-  private isStroking: boolean = false;
-  private cars = new Map<number, CarView>();
-  private ringLayer = L.layerGroup();
-  private routeLayer = L.layerGroup();
-  private pickupLayer = L.layerGroup();
+  let strokeCell: string | null = null;
+  let isStroking: boolean = false;
+  const cars = new Map<number, CarView>();
+  const ringLayer = L.layerGroup();
+  const routeLayer = L.layerGroup();
+  const pickupLayer = L.layerGroup();
   /** Hovered cell, its parent and its children (SVG, a few shapes). */
-  private hoverLayer = L.layerGroup();
-  private offerLine: L.Polyline | null = null;
-  private person: L.Marker;
-  private dest: L.Marker;
-  private offer: ActiveOffer | null = null;
-  private riderDriverId: number | null = null;
-  private pickup: LatLng | null = null;
-  private currentRing: L.Polygon[] = [];
-  private basemap: Basemap | null = null;
-  private basemapLayer: L.Layer | null = null;
-  private hoveredCell: CellHoverInfo | null = null;
-  private timeouts = new Set<ReturnType<typeof setTimeout>>();
-  private unsubscribers: (() => void)[] = [];
+  const hoverLayer = L.layerGroup();
+  let offerLine: L.Polyline | null = null;
+  let offer: ActiveOffer | null = null;
+  let riderDriverId: number | null = null;
+  let pickup: LatLng | null = null;
+  let currentRing: L.Polygon[] = [];
+  let currentBasemap: Basemap | null = null;
+  let basemapTileLayer: L.Layer | null = null;
+  let hoveredCell: CellHoverInfo | null = null;
+  const timeouts = new Set<ReturnType<typeof setTimeout>>();
+  let unsubscribers: (() => void)[] = [];
 
-  constructor(
-    el: HTMLElement,
-    private world: World,
-    bus: EventBus,
-    private callbacks: MapViewCallbacks
-  ) {
-    this.map = L.map(el, { zoomControl: false, preferCanvas: false }).setView(
-      ll(MAP_CENTER),
-      MAP_ZOOM
-    );
-    // Top-right keeps the left edge free for the control panel drawer.
-    L.control.zoom({ position: 'topright' }).addTo(this.map);
-    for (const res of HEAT_LEVELS) {
-      for (const kind of Object.values(LevelPaneKind)) {
-        if (kind === LevelPaneKind.Parent && parentLevel(res) === null) {
-          continue;
-        }
-        const name: string = levelPaneName(kind, res);
-        const pane: HTMLElement = this.map.createPane(name);
-        pane.style.zIndex = LEVEL_PANE_Z[kind];
-        pane.classList.add(
-          ...LEVEL_PANE_CLASS.base.split(' '),
-          ...LEVEL_PANE_CLASS.hidden.split(' ')
-        );
-        this.renderers.set(name, L.canvas({ padding: 0.3, pane: name }));
+  const map: L.Map = L.map(el, {
+    zoomControl: false,
+    preferCanvas: false
+  }).setView(ll(MAP_CENTER), MAP_ZOOM);
+  // Top-right keeps the left edge free for the control panel drawer.
+  L.control.zoom({ position: 'topright' }).addTo(map);
+  for (const res of HEAT_LEVELS) {
+    for (const kind of Object.values(LevelPaneKind)) {
+      if (kind === LevelPaneKind.Parent && parentLevel(res) === null) {
+        continue;
       }
+      const name: string = levelPaneName(kind, res);
+      const pane: HTMLElement = map.createPane(name);
+      pane.style.zIndex = LEVEL_PANE_Z[kind];
+      pane.classList.add(
+        ...LEVEL_PANE_CLASS.base.split(' '),
+        ...LEVEL_PANE_CLASS.hidden.split(' ')
+      );
+      renderers.set(name, L.canvas({ padding: 0.3, pane: name }));
     }
-    this.unsubscribers.push(
-      world.heat.onChange((changed: string[] | null) =>
-        this.restyleHeat(changed)
-      )
-    );
-    this.setBasemap(savedBasemap());
-    this.showLevel(this.level);
-    this.callbacks.onLevelChange(this.level);
-    this.map.on('zoomend', () => this.updateLevel());
-    this.hoverLayer.addTo(this.map);
-    this.ringLayer.addTo(this.map);
-    this.routeLayer.addTo(this.map);
-    this.pickupLayer.addTo(this.map);
-
-    this.dest = L.marker(ll(DESTINATION), { icon: destIcon, zIndexOffset: 900 })
-      .bindTooltip(`<b>${DESTINATION.name}</b><br>${DESTINATION.address}`, {
-        direction: 'top',
-        offset: [8, -28]
-      })
-      .addTo(this.map);
-    this.person = L.marker(ll(MAP_CENTER), {
-      icon: personIcon,
-      zIndexOffset: 1000
-    });
-
-    this.syncFleet();
-    this.unsubscribers.push(world.onFleetChange(() => this.syncFleet()));
-    this.map.on('mousemove', (e: L.LeafletMouseEvent) => {
-      if (this.heatBrush.tool === HeatTool.None) {
-        this.showCellInfo(e.latlng);
-        return;
-      }
-      this.showBrush(e.latlng);
-      if (this.isStroking) this.paintStroke(e.latlng);
-    });
-    this.map.on('mousedown', (e: L.LeafletMouseEvent) => {
-      if (this.heatBrush.tool === HeatTool.None) return;
-      this.isStroking = true;
-      this.strokeCell = null;
-      this.paintStroke(e.latlng);
-    });
-    this.map.on('mouseup', () => this.endStroke());
-    this.map.on('mouseout', () => {
-      this.endStroke();
-      this.hideBrush();
-      this.clearHover();
-    });
-
-    this.unsubscribers.push(
-      bus.on((e) => {
-        switch (e.type) {
-          case 'pickup_selected':
-            this.clearRide();
-            this.pickup = e.place;
-            this.person.setLatLng(ll(e.place)).addTo(this.map);
-            L.polygon(hexLatLngs(e.cell), {
-              className: HEX_CLASS.pickup,
-              interactive: false
-            }).addTo(this.pickupLayer);
-            this.map.flyTo(ll(e.place), 14, { duration: 0.8 });
-            break;
-          case 'trip_previewed':
-            this.drawTrip(e.route, e.cells);
-            break;
-          case 'ride_requested':
-            this.ringLayer.clearLayers();
-            this.currentRing = [];
-            this.map.flyTo(ll(e.ride.pickup), 13, { duration: 0.8 });
-            break;
-          case 'ring_searched':
-            this.currentRing.forEach((p) =>
-              p.getElement()?.setAttribute('class', HEX_CLASS.ringOld)
-            );
-            this.currentRing = e.cells.map((c) =>
-              L.polygon(hexLatLngs(c), {
-                className: e.found ? HEX_CLASS.ringHit : HEX_CLASS.ringCurrent,
-                interactive: false
-              }).addTo(this.ringLayer)
-            );
-            break;
-          case 'offer_sent':
-            this.offer = { driver: e.driver, startedAt: e.startedAt };
-            this.offerLine = L.polyline([ll(e.driver.pos), ll(e.ride.pickup)], {
-              className: LINE_CLASS.offer
-            }).addTo(this.map);
-            break;
-          case 'offer_result':
-            this.endOffer(e.driver, e.outcome === 'accepted');
-            if (e.outcome === 'accepted')
-              this.later(() => this.ringLayer.clearLayers(), 1500);
-            break;
-          case 'driver_assigned':
-            this.riderDriverId = e.driver.id;
-            L.polyline(e.route.points.map(ll), {
-              className: LINE_CLASS.pickupRoute
-            }).addTo(this.pickupLayer);
-            this.map.flyToBounds(
-              L.latLngBounds([ll(e.driver.pos), ll(e.ride.pickup)]).pad(0.4),
-              { duration: 0.8 }
-            );
-            break;
-          case 'picked_up':
-            this.pickupLayer.clearLayers();
-            this.person.remove();
-            this.cars.get(e.driver.id)?.root.classList.add('has-rider');
-            this.map.flyToBounds(
-              L.latLngBounds(e.ride.route.points.map(ll)).pad(0.15),
-              { duration: 0.8 }
-            );
-            break;
-          case 'dropped_off':
-            this.cars.get(e.driver.id)?.root.classList.remove('has-rider');
-            this.person.setLatLng(ll(DESTINATION)).addTo(this.map);
-            this.riderDriverId = null;
-            this.dest
-              .setTooltipContent(`<b>Arrived!</b><br>${DESTINATION.address}`)
-              .openTooltip();
-            break;
-          case 'ride_cancelled':
-            if (this.offer) this.endOffer(this.offer.driver, false);
-            this.ringLayer.clearLayers();
-            this.riderDriverId = null;
-            this.pickupLayer.clearLayers();
-            if (this.pickup)
-              this.person.setLatLng(ll(this.pickup)).addTo(this.map);
-            break;
-          case 'preview_cleared':
-          case 'reset':
-            this.clearRide();
-            this.person.remove();
-            this.pickup = null;
-            this.dest
-              .setTooltipContent(
-                `<b>${DESTINATION.name}</b><br>${DESTINATION.address}`
-              )
-              .closeTooltip();
-            if (e.type === 'reset')
-              this.map.flyTo(ll(MAP_CENTER), MAP_ZOOM, { duration: 0.8 });
-            break;
-        }
-      })
-    );
   }
+  unsubscribers.push(
+    world.heat.onChange((changed: string[] | null) => restyleHeat(changed))
+  );
+  setBasemap(savedBasemap());
+  showLevel(level);
+  callbacks.onLevelChange(level);
+  map.on('zoomend', () => updateLevel());
+  hoverLayer.addTo(map);
+  ringLayer.addTo(map);
+  routeLayer.addTo(map);
+  pickupLayer.addTo(map);
+
+  const dest: L.Marker = L.marker(ll(DESTINATION), {
+    icon: destIcon,
+    zIndexOffset: 900
+  })
+    .bindTooltip(`<b>${DESTINATION.name}</b><br>${DESTINATION.address}`, {
+      direction: 'top',
+      offset: [8, -28]
+    })
+    .addTo(map);
+  const person: L.Marker = L.marker(ll(MAP_CENTER), {
+    icon: personIcon,
+    zIndexOffset: 1000
+  });
+
+  syncFleet();
+  unsubscribers.push(world.onFleetChange(() => syncFleet()));
+  map.on('mousemove', (e: L.LeafletMouseEvent) => {
+    if (heatBrush.tool === HeatTool.None) {
+      showCellInfo(e.latlng);
+      return;
+    }
+    showBrush(e.latlng);
+    if (isStroking) paintStroke(e.latlng);
+  });
+  map.on('mousedown', (e: L.LeafletMouseEvent) => {
+    if (heatBrush.tool === HeatTool.None) return;
+    isStroking = true;
+    strokeCell = null;
+    paintStroke(e.latlng);
+  });
+  map.on('mouseup', () => endStroke());
+  map.on('mouseout', () => {
+    endStroke();
+    hideBrush();
+    clearHover();
+  });
+
+  unsubscribers.push(
+    bus.on((e) => {
+      switch (e.type) {
+        case 'pickup_selected':
+          clearRide();
+          pickup = e.place;
+          person.setLatLng(ll(e.place)).addTo(map);
+          L.polygon(hexLatLngs(e.cell), {
+            className: HEX_CLASS.pickup,
+            interactive: false
+          }).addTo(pickupLayer);
+          map.flyTo(ll(e.place), 14, { duration: 0.8 });
+          break;
+        case 'trip_previewed':
+          drawTrip(e.route, e.cells);
+          break;
+        case 'ride_requested':
+          ringLayer.clearLayers();
+          currentRing = [];
+          map.flyTo(ll(e.ride.pickup), 13, {
+            duration: REQUEST_FLY_MS / 1000
+          });
+          break;
+        case 'ring_searched':
+          currentRing.forEach((p) =>
+            p.getElement()?.setAttribute('class', HEX_CLASS.ringOld)
+          );
+          currentRing = e.cells.map((c) =>
+            L.polygon(hexLatLngs(c), {
+              className: e.found ? HEX_CLASS.ringHit : HEX_CLASS.ringCurrent,
+              interactive: false
+            }).addTo(ringLayer)
+          );
+          break;
+        case 'offer_sent':
+          offer = { driver: e.driver, startedAt: e.startedAt };
+          offerLine = L.polyline([ll(e.driver.pos), ll(e.ride.pickup)], {
+            className: LINE_CLASS.offer
+          }).addTo(map);
+          break;
+        case 'offer_result':
+          endOffer(e.driver, e.outcome === 'accepted');
+          if (e.outcome === 'accepted')
+            later(() => ringLayer.clearLayers(), 1500);
+          break;
+        case 'driver_assigned':
+          riderDriverId = e.driver.id;
+          L.polyline(e.route.points.map(ll), {
+            className: LINE_CLASS.pickupRoute
+          }).addTo(pickupLayer);
+          map.flyToBounds(
+            L.latLngBounds([ll(e.driver.pos), ll(e.ride.pickup)]).pad(0.4),
+            { duration: 0.8 }
+          );
+          break;
+        case 'picked_up':
+          pickupLayer.clearLayers();
+          person.remove();
+          cars.get(e.driver.id)?.root.classList.add('has-rider');
+          map.flyToBounds(
+            L.latLngBounds(e.ride.route.points.map(ll)).pad(0.15),
+            { duration: 0.8 }
+          );
+          break;
+        case 'dropped_off':
+          cars.get(e.driver.id)?.root.classList.remove('has-rider');
+          person.setLatLng(ll(DESTINATION)).addTo(map);
+          riderDriverId = null;
+          dest
+            .setTooltipContent(`<b>Arrived!</b><br>${DESTINATION.address}`)
+            .openTooltip();
+          break;
+        case 'ride_cancelled':
+          if (offer) endOffer(offer.driver, false);
+          ringLayer.clearLayers();
+          riderDriverId = null;
+          pickupLayer.clearLayers();
+          if (pickup) person.setLatLng(ll(pickup)).addTo(map);
+          break;
+        case 'preview_cleared':
+        case 'reset':
+          clearRide();
+          person.remove();
+          pickup = null;
+          dest
+            .setTooltipContent(
+              `<b>${DESTINATION.name}</b><br>${DESTINATION.address}`
+            )
+            .closeTooltip();
+          if (e.type === 'reset')
+            map.flyTo(ll(MAP_CENTER), MAP_ZOOM, { duration: 0.8 });
+          break;
+      }
+    })
+  );
 
   /** Detach from the bus and fleet, cancel pending timers and tear down Leaflet. */
-  destroy(): void {
-    this.unsubscribers.forEach((unsubscribe) => unsubscribe());
-    this.unsubscribers = [];
-    this.timeouts.forEach((id) => clearTimeout(id));
-    this.timeouts.clear();
-    this.setHeatBrush({ ...this.heatBrush, tool: HeatTool.None });
-    this.map.remove();
-    this.cars.clear();
+  function destroy(): void {
+    unsubscribers.forEach((unsubscribe) => unsubscribe());
+    unsubscribers = [];
+    timeouts.forEach((id) => clearTimeout(id));
+    timeouts.clear();
+    setHeatBrush({ ...heatBrush, tool: HeatTool.None });
+    map.remove();
+    cars.clear();
   }
 
   /** Cell outlines of the level on screen. */
-  setGridVisible(isVisible: boolean): void {
-    this.toggleLevelPanes(LevelPaneKind.Outline, isVisible);
+  function setGridVisible(isVisible: boolean): void {
+    toggleLevelPanes(LevelPaneKind.Outline, isVisible);
   }
 
-  setHeatVisible(isVisible: boolean): void {
-    this.toggleLevelPanes(LevelPaneKind.Heat, isVisible);
+  function setHeatVisible(isVisible: boolean): void {
+    toggleLevelPanes(LevelPaneKind.Heat, isVisible);
   }
 
   /** Bold outlines of the next-coarser level over the current one. */
-  setParentOutlinesVisible(isVisible: boolean): void {
-    this.toggleLevelPanes(LevelPaneKind.Parent, isVisible);
+  function setParentOutlinesVisible(isVisible: boolean): void {
+    toggleLevelPanes(LevelPaneKind.Parent, isVisible);
   }
 
-  setLevelMode(mode: LevelMode): void {
-    this.levelMode = mode;
-    this.updateLevel();
+  function setLevelMode(mode: LevelMode): void {
+    levelMode = mode;
+    updateLevel();
   }
 
-  private toggleLevelPanes(kind: LevelPaneKind, isVisible: boolean): void {
+  function toggleLevelPanes(kind: LevelPaneKind, isVisible: boolean): void {
     for (const res of HEAT_LEVELS) {
-      this.map
+      map
         .getPane(levelPaneName(kind, res))
         ?.classList.toggle('hidden', !isVisible);
     }
   }
 
   /** Switch to the level the mode and zoom call for, fading the old one out. */
-  private updateLevel(): void {
+  function updateLevel(): void {
     const next: HeatLevel =
-      this.levelMode === AUTO_LEVEL_MODE
-        ? levelForZoom(this.map.getZoom())
-        : this.levelMode;
-    if (next === this.level) return;
-    const previous: HeatLevel = this.level;
-    this.level = next;
-    this.showLevel(next);
-    this.fadeOutLevel(previous);
-    this.clearHover();
-    this.hideBrush();
-    this.strokeCell = null;
-    this.callbacks.onLevelChange(next);
+      levelMode === AUTO_LEVEL_MODE ? levelForZoom(map.getZoom()) : levelMode;
+    if (next === level) return;
+    const previous: HeatLevel = level;
+    level = next;
+    showLevel(next);
+    fadeOutLevel(previous);
+    clearHover();
+    hideBrush();
+    strokeCell = null;
+    callbacks.onLevelChange(next);
   }
 
-  private setLevelPanesShown(res: HeatLevel, isShown: boolean): void {
+  function setLevelPanesShown(res: HeatLevel, isShown: boolean): void {
     const [add, remove] = isShown
       ? [LEVEL_PANE_CLASS.shown, LEVEL_PANE_CLASS.hidden]
       : [LEVEL_PANE_CLASS.hidden, LEVEL_PANE_CLASS.shown];
     for (const kind of Object.values(LevelPaneKind)) {
-      const pane: HTMLElement | undefined = this.map.getPane(
+      const pane: HTMLElement | undefined = map.getPane(
         levelPaneName(kind, res)
       );
       pane?.classList.remove(...remove.split(' '));
@@ -579,30 +591,30 @@ export class MapView {
     }
   }
 
-  private showLevel(res: HeatLevel): void {
-    const layers: LevelLayers = this.levels.get(res) ?? this.buildLevel(res);
-    layers.heat.addTo(this.map);
-    layers.outline.addTo(this.map);
-    layers.parentOutline?.addTo(this.map);
+  function showLevel(res: HeatLevel): void {
+    const layers: LevelLayers = levels.get(res) ?? buildLevel(res);
+    layers.heat.addTo(map);
+    layers.outline.addTo(map);
+    layers.parentOutline?.addTo(map);
     // Other levels skip restyles while hidden, so catch up on show.
-    this.restyleHeat(null);
-    this.setLevelPanesShown(res, true);
+    restyleHeat(null);
+    setLevelPanesShown(res, true);
   }
 
   /** Fade the panes, then drop the layers so hidden canvases stop redrawing. */
-  private fadeOutLevel(res: HeatLevel): void {
-    this.setLevelPanesShown(res, false);
-    this.later(() => {
-      if (res === this.level) return;
-      const layers: LevelLayers | undefined = this.levels.get(res);
+  function fadeOutLevel(res: HeatLevel): void {
+    setLevelPanesShown(res, false);
+    later(() => {
+      if (res === level) return;
+      const layers: LevelLayers | undefined = levels.get(res);
       layers?.heat.remove();
       layers?.outline.remove();
       layers?.parentOutline?.remove();
     }, LEVEL_FADE_MS);
   }
 
-  private buildLevel(res: HeatLevel): LevelLayers {
-    const heatRenderer: L.Canvas | undefined = this.renderers.get(
+  function buildLevel(res: HeatLevel): LevelLayers {
+    const heatRenderer: L.Canvas | undefined = renderers.get(
       levelPaneName(LevelPaneKind.Heat, res)
     );
     const heatPolys = new Map<string, L.Polygon>();
@@ -621,10 +633,10 @@ export class MapView {
     const outline: L.Polygon = L.polygon(
       [...LEVEL_CELL_SETS.get(res)!].map((cell: string) => [hexLatLngs(cell)]),
       {
-        renderer: this.renderers.get(levelPaneName(LevelPaneKind.Outline, res)),
+        renderer: renderers.get(levelPaneName(LevelPaneKind.Outline, res)),
         fill: false,
         interactive: false,
-        ...this.outlineStyle
+        ...outlineStyle
       }
     );
     const parent: HeatLevel | null = parentLevel(res);
@@ -636,38 +648,36 @@ export class MapView {
               hexLatLngs(cell)
             ]),
             {
-              renderer: this.renderers.get(
-                levelPaneName(LevelPaneKind.Parent, res)
-              ),
+              renderer: renderers.get(levelPaneName(LevelPaneKind.Parent, res)),
               fill: false,
               interactive: false,
-              ...this.parentOutlineStyle
+              ...parentOutlineStyle
             }
           );
     const layers: LevelLayers = { heatPolys, heat, outline, parentOutline };
-    this.levels.set(res, layers);
+    levels.set(res, layers);
     return layers;
   }
 
   /** Switch the heat editing tool; any active tool disables map dragging. */
-  setHeatBrush(brush: HeatBrush): void {
-    const wasPainting: boolean = this.heatBrush.tool !== HeatTool.None;
+  function setHeatBrush(brush: HeatBrush): void {
+    const wasPainting: boolean = heatBrush.tool !== HeatTool.None;
     const isPainting: boolean = brush.tool !== HeatTool.None;
-    const ringsChanged: boolean = brush.rings !== this.heatBrush.rings;
-    this.heatBrush = { ...brush };
+    const ringsChanged: boolean = brush.rings !== heatBrush.rings;
+    heatBrush = { ...brush };
     if (isPainting && !wasPainting) {
-      this.map.dragging.disable();
-      this.map.doubleClickZoom.disable();
-      this.map.getContainer().classList.add('leaflet-crosshair');
-      this.clearHover();
+      map.dragging.disable();
+      map.doubleClickZoom.disable();
+      map.getContainer().classList.add('leaflet-crosshair');
+      clearHover();
     } else if (!isPainting && wasPainting) {
-      this.map.dragging.enable();
-      this.map.doubleClickZoom.enable();
-      this.map.getContainer().classList.remove('leaflet-crosshair');
-      this.endStroke();
-      this.hideBrush();
-    } else if (isPainting && ringsChanged && this.brushCell) {
-      this.drawBrush(this.brushCell);
+      map.dragging.enable();
+      map.doubleClickZoom.enable();
+      map.getContainer().classList.remove('leaflet-crosshair');
+      endStroke();
+      hideBrush();
+    } else if (isPainting && ringsChanged && brushCell) {
+      drawBrush(brushCell);
     }
   }
 
@@ -676,98 +686,86 @@ export class MapView {
    * cell, so any change can recolour every cell: res 7/8 always restyle all,
    * res 9 only the changed cells unless the max moved.
    */
-  private restyleHeat(changed: string[] | null): void {
-    const layers: LevelLayers | undefined = this.levels.get(this.level);
+  function restyleHeat(changed: string[] | null): void {
+    const layers: LevelLayers | undefined = levels.get(level);
     if (!layers) return;
-    const max: number = this.world.heat.maxAt(this.level);
+    const max: number = world.heat.maxAt(level);
     const cells: Iterable<string> =
-      changed === null || this.level !== HEAT_RES || max !== this.lastHeatMax
+      changed === null || level !== HEAT_RES || max !== lastHeatMax
         ? layers.heatPolys.keys()
         : changed;
-    if (this.level === HEAT_RES) this.lastHeatMax = max;
+    if (level === HEAT_RES) lastHeatMax = max;
     for (const cell of cells) {
       layers.heatPolys
         .get(cell)
-        ?.setStyle(
-          heatStyle(
-            this.world.heat.intensity(cell),
-            this.level,
-            this.isDarkBasemap
-          )
-        );
+        ?.setStyle(heatStyle(world.heat.intensity(cell), level, isDarkBasemap));
     }
   }
 
-  private get brushRings(): number {
-    return this.level === HEAT_LEVELS[0]
-      ? Math.min(this.heatBrush.rings, MAX_RES7_BRUSH_RINGS)
-      : this.heatBrush.rings;
+  function brushRings(): number {
+    return level === HEAT_LEVELS[0]
+      ? Math.min(heatBrush.rings, MAX_RES7_BRUSH_RINGS)
+      : heatBrush.rings;
   }
 
   /** Paints once per cell entered at the level on screen, so a still cursor doesn't pile up. */
-  private paintStroke(p: L.LatLng): void {
-    const cell: string = latLngToCell(p.lat, p.lng, this.level);
-    if (cell === this.strokeCell) return;
-    this.strokeCell = cell;
-    const { tool, strength } = this.heatBrush;
-    this.world.heat.paint(
-      p,
-      this.brushRings,
-      strength,
-      tool === HeatTool.Erase,
-      this.level
-    );
+  function paintStroke(p: L.LatLng): void {
+    const cell: string = latLngToCell(p.lat, p.lng, level);
+    if (cell === strokeCell) return;
+    strokeCell = cell;
+    const { tool, strength } = heatBrush;
+    world.heat.paint(p, brushRings(), strength, tool === HeatTool.Erase, level);
   }
 
-  private endStroke(): void {
-    this.isStroking = false;
-    this.strokeCell = null;
+  function endStroke(): void {
+    isStroking = false;
+    strokeCell = null;
   }
 
-  private showBrush(p: L.LatLng): void {
-    const cell: string = latLngToCell(p.lat, p.lng, this.level);
-    if (cell === this.brushCell && this.brushHex) return;
-    this.drawBrush(cell);
+  function showBrush(p: L.LatLng): void {
+    const cell: string = latLngToCell(p.lat, p.lng, level);
+    if (cell === brushCell && brushHex) return;
+    drawBrush(cell);
   }
 
   /** `cell` is at the level on screen; the brush is a disk of that level. */
-  private drawBrush(cell: string): void {
-    this.brushCell = cell;
+  function drawBrush(cell: string): void {
+    brushCell = cell;
     const outline = cellsToMultiPolygon(
-      gridDisk(cell, this.brushRings)
+      gridDisk(cell, brushRings())
     ) as L.LatLngTuple[][][];
-    if (!this.brushHex) {
-      this.brushHex = L.polygon(outline, {
+    if (!brushHex) {
+      brushHex = L.polygon(outline, {
         className: HEX_CLASS.brush,
         interactive: false
       });
     } else {
-      this.brushHex.setLatLngs(outline);
+      brushHex.setLatLngs(outline);
     }
-    this.brushHex.addTo(this.map);
+    brushHex.addTo(map);
   }
 
-  private hideBrush(): void {
-    this.brushHex?.remove();
-    this.brushCell = null;
+  function hideBrush(): void {
+    brushHex?.remove();
+    brushCell = null;
   }
 
-  private later(fn: () => void, ms: number): void {
+  function later(fn: () => void, ms: number): void {
     const id = setTimeout(() => {
-      this.timeouts.delete(id);
+      timeouts.delete(id);
       fn();
     }, ms);
-    this.timeouts.add(id);
+    timeouts.add(id);
   }
 
   /** Called every animation frame. */
-  frame(now: number): void {
-    for (const d of this.world.drivers.values()) {
-      const view = this.cars.get(d.id);
+  function frame(now: number): void {
+    for (const d of world.drivers.values()) {
+      const view = cars.get(d.id);
       if (!view) continue;
       view.marker.setLatLng(ll(d.pos));
       view.body.style.transform = `rotate(${d.heading}deg)`;
-      const cls = `car state-${d.state}${d.brain === 'llm' ? ' llm' : ''}${d.id === this.riderDriverId ? ' mine' : ''}`;
+      const cls = `car state-${d.state}${d.brain === 'llm' ? ' llm' : ''}${d.id === riderDriverId ? ' mine' : ''}`;
       if (cls !== view.stateClass) {
         const keep = ['has-rider', 'flash-yes', 'flash-no'].filter((c) =>
           view.root.classList.contains(c)
@@ -777,9 +775,9 @@ export class MapView {
         view.marker.setZIndexOffset(d.state === 'idle' ? 0 : 500);
       }
     }
-    if (this.offer) {
-      const { driver, startedAt } = this.offer;
-      const view = this.cars.get(driver.id);
+    if (offer) {
+      const { driver, startedAt } = offer;
+      const view = cars.get(driver.id);
       const left = Math.max(0, OFFER_TIMEOUT_MS - (now - startedAt));
       if (view) {
         view.ringFg.style.strokeDashoffset = String(
@@ -787,22 +785,22 @@ export class MapView {
         );
         view.timer.textContent = String(Math.ceil(left / 1000));
       }
-      if (this.offerLine && this.pickup)
-        this.offerLine.setLatLngs([ll(driver.pos), ll(this.pickup)]);
+      if (offerLine && pickup)
+        offerLine.setLatLngs([ll(driver.pos), ll(pickup)]);
     }
   }
 
-  private endOffer(driver: Driver, accepted: boolean): void {
-    if (this.offer?.driver !== driver) return;
-    this.offer = null;
-    this.offerLine?.remove();
-    this.offerLine = null;
-    const view = this.cars.get(driver.id);
+  function endOffer(driver: Driver, accepted: boolean): void {
+    if (offer?.driver !== driver) return;
+    offer = null;
+    offerLine?.remove();
+    offerLine = null;
+    const view = cars.get(driver.id);
     if (!view) return;
     const cls = accepted ? 'flash-yes' : 'flash-no';
     view.timer.textContent = accepted ? '✓' : '✗';
     view.root.classList.add(cls);
-    this.later(() => {
+    later(() => {
       view.root.classList.remove(cls);
       view.timer.textContent = '';
       view.ringFg.style.strokeDashoffset = '0';
@@ -810,40 +808,40 @@ export class MapView {
   }
 
   /** Swap the tile layer and restyle the outlines and heat for its theme. */
-  setBasemap(basemap: Basemap): void {
-    if (basemap === this.basemap) return;
-    this.basemapLayer?.remove();
-    this.basemap = basemap;
-    this.basemapLayer = basemapLayer(basemap).addTo(this.map);
-    this.map.getContainer().classList.toggle('theme-dark', basemap.dark);
+  function setBasemap(basemap: Basemap): void {
+    if (basemap === currentBasemap) return;
+    basemapTileLayer?.remove();
+    currentBasemap = basemap;
+    basemapTileLayer = basemapLayer(basemap).addTo(map);
+    map.getContainer().classList.toggle('theme-dark', basemap.dark);
     const theme: 'light' | 'dark' = basemap.dark ? 'dark' : 'light';
-    this.outlineStyle = outlinePathOptions(OUTLINE_STYLE[theme]);
-    this.parentOutlineStyle = outlinePathOptions(PARENT_OUTLINE_STYLE[theme]);
-    for (const layers of this.levels.values()) {
-      layers.outline.setStyle(this.outlineStyle);
-      layers.parentOutline?.setStyle(this.parentOutlineStyle);
+    outlineStyle = outlinePathOptions(OUTLINE_STYLE[theme]);
+    parentOutlineStyle = outlinePathOptions(PARENT_OUTLINE_STYLE[theme]);
+    for (const layers of levels.values()) {
+      layers.outline.setStyle(outlineStyle);
+      layers.parentOutline?.setStyle(parentOutlineStyle);
     }
-    this.isDarkBasemap = basemap.dark;
-    this.restyleHeat(null);
+    isDarkBasemap = basemap.dark;
+    restyleHeat(null);
     saveBasemap(basemap);
   }
 
-  private drawTrip(route: Route, cells: string[]): void {
-    this.routeLayer.clearLayers();
+  function drawTrip(route: Route, cells: string[]): void {
+    routeLayer.clearLayers();
     for (const c of cells) {
       L.polygon(hexLatLngs(c), {
         className: HEX_CLASS.route,
         interactive: false
-      }).addTo(this.routeLayer);
+      }).addTo(routeLayer);
     }
     L.polyline(route.points.map(ll), {
       className: LINE_CLASS.tripCasing,
       interactive: false
-    }).addTo(this.routeLayer);
+    }).addTo(routeLayer);
     const line = L.polyline(route.points.map(ll), {
       className: LINE_CLASS.tripRoute,
       interactive: false
-    }).addTo(this.routeLayer);
+    }).addTo(routeLayer);
     const mins = Math.round(route.durationS / 60);
     const arrive = new Date(
       Date.now() + route.durationS * 1000
@@ -857,45 +855,45 @@ export class MapView {
         // no token for the 130% lift above the route midpoint; arbitrary by design
         html: `<div class="absolute -translate-x-1/2 -translate-y-[130%] rounded-md bg-gray-90 px-fixed-2xs py-1.5 font-inter text-fluid-s whitespace-nowrap text-fg-alternate shadow-lg"><b>${mins} min</b> · ${(route.distanceM / 1000).toFixed(1)} km<small class="block text-fluid-xs text-gray-20">arrive ~${arrive}</small></div>`
       })
-    }).addTo(this.routeLayer);
-    this.map.flyToBounds(line.getBounds().pad(0.15), { duration: 0.9 });
+    }).addTo(routeLayer);
+    map.flyToBounds(line.getBounds().pad(0.15), { duration: 0.9 });
   }
 
-  private clearRide(): void {
-    if (this.offer) this.endOffer(this.offer.driver, false);
-    this.ringLayer.clearLayers();
-    this.routeLayer.clearLayers();
-    this.pickupLayer.clearLayers();
-    this.riderDriverId = null;
+  function clearRide(): void {
+    if (offer) endOffer(offer.driver, false);
+    ringLayer.clearLayers();
+    routeLayer.clearLayers();
+    pickupLayer.clearLayers();
+    riderDriverId = null;
   }
 
-  private syncFleet(): void {
-    for (const [id, view] of this.cars) {
-      if (!this.world.drivers.has(id)) {
+  function syncFleet(): void {
+    for (const [id, view] of cars) {
+      if (!world.drivers.has(id)) {
         view.marker.remove();
-        this.cars.delete(id);
+        cars.delete(id);
       }
     }
-    for (const d of this.world.drivers.values()) {
-      if (this.cars.has(d.id)) continue;
+    for (const d of world.drivers.values()) {
+      if (cars.has(d.id)) continue;
       const marker = L.marker(ll(d.pos), {
         icon: carIcon(d),
         riseOnHover: true
-      }).addTo(this.map);
+      }).addTo(map);
       // One persistent container per car; React portals DriverPopup into it.
       const container = document.createElement('div');
       container.className = 'driver-popup min-w-56 font-inter text-fluid-s';
       marker.bindPopup(container, { offset: [0, -12] });
       marker.on('popupopen', (e: L.PopupEvent) =>
-        this.callbacks.onDriverPopupOpen({
+        callbacks.onDriverPopupOpen({
           driver: d,
           container,
           popup: e.popup
         })
       );
-      marker.on('popupclose', () => this.callbacks.onDriverPopupClose(d));
+      marker.on('popupclose', () => callbacks.onDriverPopupClose(d));
       const root = marker.getElement()!.querySelector<HTMLElement>('.car')!;
-      this.cars.set(d.id, {
+      cars.set(d.id, {
         marker,
         root,
         body: root.querySelector('.car-body')!,
@@ -907,11 +905,11 @@ export class MapView {
   }
 
   /** Hover the cell of the level on screen, with its parent and children. */
-  private showCellInfo(p: L.LatLng): void {
-    const res: HeatLevel = this.level;
+  function showCellInfo(p: L.LatLng): void {
+    const res: HeatLevel = level;
     const cell: string = latLngToCell(p.lat, p.lng, res);
     if (!LEVEL_CELL_SETS.get(res)!.has(cell)) {
-      this.clearHover();
+      clearHover();
       return;
     }
     const parentRes: HeatLevel | null = parentLevel(res);
@@ -924,49 +922,49 @@ export class MapView {
         : cellToChildren(cell, childRes).filter((child: string) =>
             LEVEL_CELL_SETS.get(childRes)!.has(child)
           );
-    if (cell !== this.hoveredCell?.cell) {
-      this.hoverLayer.clearLayers();
+    if (cell !== hoveredCell?.cell) {
+      hoverLayer.clearLayers();
       if (children.length > 0) {
         L.polygon(
           children.map((child: string) => [hexLatLngs(child)]),
           { className: HEX_CLASS.hoverChildren, interactive: false }
-        ).addTo(this.hoverLayer);
+        ).addTo(hoverLayer);
       }
       L.polygon(hexLatLngs(cell), {
         className: HEX_CLASS.hover,
         interactive: false
-      }).addTo(this.hoverLayer);
+      }).addTo(hoverLayer);
       if (parent !== null) {
         L.polygon(hexLatLngs(parent), {
           className: HEX_CLASS.hoverParent,
           interactive: false
-        }).addTo(this.hoverLayer);
+        }).addTo(hoverLayer);
       }
     }
-    this.reportCellHover({
+    reportCellHover({
       cell,
       res,
       parent,
       children: children.length,
-      demand: this.world.heat.total(cell),
-      share: this.world.heat.intensity(cell),
+      demand: world.heat.total(cell),
+      share: world.heat.intensity(cell),
       breadcrumb: HEAT_LEVELS.filter((r: HeatLevel) => r <= res).map(
         (r: HeatLevel) => ({
           res: r,
           cell: r === res ? cell : cellToParent(cell, r)
         })
       ),
-      driversHere: this.countDriversIn(cell, res),
-      occupiedCells: this.world.index.occupiedCellCount
+      driversHere: countDriversIn(cell, res),
+      occupiedCells: world.index.occupiedCellCount
     });
   }
 
   /** Drivers are indexed by dispatch cell, so roll up coarser and scan finer. */
-  private countDriversIn(cell: string, res: HeatLevel): number {
-    const { byCell } = this.world.index;
+  function countDriversIn(cell: string, res: HeatLevel): number {
+    const { byCell } = world.index;
     if (res > H3_RES) {
       let count: number = 0;
-      for (const d of this.world.drivers.values()) {
+      for (const d of world.drivers.values()) {
         if (toHeatCell(d.pos) === cell) count++;
       }
       return count;
@@ -979,14 +977,14 @@ export class MapView {
     );
   }
 
-  private clearHover(): void {
-    this.hoverLayer.clearLayers();
-    this.reportCellHover(null);
+  function clearHover(): void {
+    hoverLayer.clearLayers();
+    reportCellHover(null);
   }
 
   /** Only notifies React when what the overlay shows actually changed. */
-  private reportCellHover(info: CellHoverInfo | null): void {
-    const prev = this.hoveredCell;
+  function reportCellHover(info: CellHoverInfo | null): void {
+    const prev = hoveredCell;
     if (
       prev === info ||
       (prev &&
@@ -999,7 +997,19 @@ export class MapView {
     ) {
       return;
     }
-    this.hoveredCell = info;
-    this.callbacks.onCellHover(info);
+    hoveredCell = info;
+    callbacks.onCellHover(info);
   }
+
+  return {
+    map,
+    destroy,
+    setGridVisible,
+    setHeatVisible,
+    setParentOutlinesVisible,
+    setLevelMode,
+    setHeatBrush,
+    frame,
+    setBasemap
+  };
 }

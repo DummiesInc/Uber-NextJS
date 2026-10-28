@@ -4,9 +4,9 @@ import { useEffect, useRef, useState } from 'react';
 import { MAP_CENTER, OFFER_TIMEOUT_MS } from '@/lib/sim/config';
 import { randomPlaces } from '@/lib/sim/data/locations';
 import type { Quote } from '@/lib/sim/dispatch';
-import type { Driver } from '@/lib/sim/driver';
+import { driverElapsed, type Driver } from '@/lib/sim/driver';
 import type { OfferOutcome, SimEvent } from '@/lib/sim/events';
-import type { PathFollower } from '@/lib/sim/geo';
+import { pathRemainingM, pathRemainingS, type Path } from '@/lib/sim/geo';
 import type { Category, LatLng, Place, Ride } from '@/lib/sim/types';
 import {
   useSimEvent,
@@ -232,7 +232,7 @@ export function usePhone(): Phone {
       )
     : 0;
 
-  const activePath: PathFollower | null = driver?.activePath ?? null;
+  const activePath: Path | null = driver?.path ?? null;
   let liveTrip: LiveTripProgress | null = null;
   if (
     (screen === PhoneScreen.EnRoute || screen === PhoneScreen.Trip) &&
@@ -240,11 +240,11 @@ export function usePhone(): Phone {
     activePath &&
     ride?.status !== 'driverArrived'
   ) {
-    const elapsedS: number = driver.elapsed(world.simTime);
-    const remainingS: number = activePath.remainingS(elapsedS);
+    const elapsedS: number = driverElapsed(driver, world.simTime);
+    const remainingS: number = pathRemainingS(activePath, elapsedS);
     liveTrip = {
       minutes: Math.max(1, Math.ceil(remainingS / 60)),
-      remainingKm: (activePath.remainingM(elapsedS) / 1000).toFixed(1),
+      remainingKm: (pathRemainingM(activePath, elapsedS) / 1000).toFixed(1),
       remainingS,
       percent: Math.min(100, (elapsedS / activePath.durationS) * 100)
     };

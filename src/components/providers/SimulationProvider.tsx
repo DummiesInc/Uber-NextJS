@@ -12,9 +12,9 @@ import {
   type ReactNode
 } from 'react';
 import { z } from 'zod';
-import { App } from '@/lib/sim/app';
-import { EventBus, type SimEvent } from '@/lib/sim/events';
-import { World } from '@/lib/sim/world';
+import { createApp, type App } from '@/lib/sim/app';
+import { createEventBus, type EventBus, type SimEvent } from '@/lib/sim/events';
+import { createWorld, type World } from '@/lib/sim/world';
 
 type FrameCallback = (now: number) => void;
 
@@ -60,10 +60,10 @@ export default function SimulationProvider({
   // Lazy init keeps one engine for the component's lifetime (StrictMode
   // reuses the kept state on its simulated remount).
   const [engine] = useState<SimulationEngine>(() => {
-    const bus: EventBus = new EventBus();
-    const world: World = new World();
+    const bus: EventBus = createEventBus();
+    const world: World = createWorld();
     loadSavedHeat(world);
-    return { bus, world, app: new App(world, bus) };
+    return { bus, world, app: createApp(world, bus) };
   });
   const frameCallbacksRef = useRef<Set<FrameCallback>>(new Set());
 

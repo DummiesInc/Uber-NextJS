@@ -11,8 +11,9 @@ import { createPortal } from 'react-dom';
 import { PERSONAS } from '@/lib/sim/drivers/personas';
 import type { Driver } from '@/lib/sim/driver';
 import {
-  MapView,
+  createMapView,
   type CellHoverInfo,
+  type MapView,
   type DriverPopupTarget
 } from '@/components/map/mapView';
 import CellInfo from '@/components/map/CellInfo';
@@ -44,7 +45,7 @@ export default function GodMap() {
   useEffect(() => {
     const mapEl: HTMLDivElement | null = mapElRef.current;
     if (!mapEl) return;
-    const mapView: MapView = new MapView(mapEl, world, bus, {
+    const mapView: MapView = createMapView(mapEl, world, bus, {
       onCellHover: setCellHover,
       onLevelChange: setCurrentLevel,
       onDriverPopupOpen: setDriverPopup,

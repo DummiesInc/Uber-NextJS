@@ -44,6 +44,13 @@ Everything runs in the browser except the optional Claude call.
 - **Anthropic SDK and zod:** with `ANTHROPIC_API_KEY` in `.env.local`, a car can be made "Claude-powered". Claude (`claude-haiku-5-5`) then decides whether to accept each ride offer, and gives an in-character reason. zod checks the request and the response.
 - **Cost:** this is the only part of the app that costs money. Without a key, every driver uses the free rule-based logic.
 
+### Code style
+The simulator is written with functions, not classes:
+- **Long-lived services** are factory functions that return plain objects: `createWorld`, `createApp`, `createDispatcher`, `createHeatMap`, `createLocationIndex`, `createEventBus` and `createMapView`.
+  - Private state lives in each function's local variables.
+  - State the UI reads or sets stays on the returned object, such as `world.paused`, `world.speed` and `app.pickup`.
+- **Things with many copies** are plain data plus functions. A driver is a record built by `createDriver`, and moved by `stepDriver`, `followRoute` and `stopDriver`. A route is a `Path` from `createPath`, read with `pathAt`.
+
 ## 1. Finding nearby cars: ring search on H3 hexagons
 
 Code: [`src/lib/sim/dispatch.ts`](src/lib/sim/dispatch.ts), [`src/lib/sim/locationIndex.ts`](src/lib/sim/locationIndex.ts)
@@ -85,7 +92,7 @@ There are three fallback levels:
 3. **Hexagon path (last resort).** `gridPathCells` draws a line of hexagons from A to B and the car moves through their centers at a fixed speed.
 
 ### Moving cars along the route
-A `PathFollower` (in [`src/lib/sim/geo.ts`](src/lib/sim/geo.ts)) precomputes the length along the route at every point. Each frame it places the car the right fraction along the route for the time elapsed, and sets its heading from the current road segment.
+`createPath` (in [`src/lib/sim/geo.ts`](src/lib/sim/geo.ts)) precomputes the length along the route at every point. Each frame `pathAt` places the car the right fraction along the route for the time elapsed, and sets its heading from the current road segment.
 
 ### Route hexes
 The blue "route hexes" on the map are the res-8 hexagons the route passes through. Gaps between route points are filled with hexagon lines, so the strip has no holes.

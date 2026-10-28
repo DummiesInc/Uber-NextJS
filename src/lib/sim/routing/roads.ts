@@ -86,13 +86,13 @@ export function roadRoute(start: number, goal: number): Route | null {
     };
   const g = new Map<number, number>([[start, 0]]);
   const via = new Map<number, number>(); // node -> edge used to reach it
-  const heap = new MinHeap();
+  const heap = createHeap();
   const h = (n: number) => haversine(NODES[n], NODES[goal]) / MAX_SPEED;
-  heap.push(start, h(start));
+  heapPush(heap, start, h(start));
   const closed = new Set<number>();
 
-  while (heap.size) {
-    const n = heap.pop();
+  while (heap.items.length) {
+    const n = heapPop(heap);
     if (n === goal) break;
     if (closed.has(n)) continue;
     closed.add(n);
@@ -104,7 +104,7 @@ export function roadRoute(start: number, goal: number): Route | null {
       if (cost < (g.get(m) ?? Infinity)) {
         g.set(m, cost);
         via.set(m, ei);
-        heap.push(m, cost + h(m));
+        heapPush(heap, m, cost + h(m));
       }
     }
   }
@@ -129,53 +129,50 @@ export function roadRoute(start: number, goal: number): Route | null {
   return { points, distanceM, durationS: g.get(goal)!, source: 'roads' };
 }
 
-class MinHeap {
-  private items: number[] = [];
-  private prio: number[] = [];
+/** Binary min-heap of node ids, kept as two parallel arrays. */
+interface MinHeap {
+  items: number[];
+  prio: number[];
+}
 
-  get size(): number {
-    return this.items.length;
+const createHeap = (): MinHeap => ({ items: [], prio: [] });
+
+function heapPush(heap: MinHeap, item: number, p: number): void {
+  const { items, prio } = heap;
+  let i = items.length;
+  items.push(item);
+  prio.push(p);
+  while (i > 0) {
+    const parent = (i - 1) >> 1;
+    if (prio[parent] <= p) break;
+    items[i] = items[parent];
+    prio[i] = prio[parent];
+    i = parent;
   }
+  items[i] = item;
+  prio[i] = p;
+}
 
-  push(item: number, p: number): void {
-    const items = this.items;
-    const prio = this.prio;
-    let i = items.length;
-    items.push(item);
-    prio.push(p);
-    while (i > 0) {
-      const parent = (i - 1) >> 1;
-      if (prio[parent] <= p) break;
-      items[i] = items[parent];
-      prio[i] = prio[parent];
-      i = parent;
+function heapPop(heap: MinHeap): number {
+  const { items, prio } = heap;
+  const top = items[0];
+  const lastItem = items.pop()!;
+  const lastP = prio.pop()!;
+  if (items.length > 0) {
+    let i = 0;
+    const n = items.length;
+    for (;;) {
+      const l = 2 * i + 1;
+      if (l >= n) break;
+      const r = l + 1;
+      const c = r < n && prio[r] < prio[l] ? r : l;
+      if (prio[c] >= lastP) break;
+      items[i] = items[c];
+      prio[i] = prio[c];
+      i = c;
     }
-    items[i] = item;
-    prio[i] = p;
+    items[i] = lastItem;
+    prio[i] = lastP;
   }
-
-  pop(): number {
-    const items = this.items;
-    const prio = this.prio;
-    const top = items[0];
-    const lastItem = items.pop()!;
-    const lastP = prio.pop()!;
-    if (items.length > 0) {
-      let i = 0;
-      const n = items.length;
-      for (;;) {
-        const l = 2 * i + 1;
-        if (l >= n) break;
-        const r = l + 1;
-        const c = r < n && prio[r] < prio[l] ? r : l;
-        if (prio[c] >= lastP) break;
-        items[i] = items[c];
-        prio[i] = prio[c];
-        i = c;
-      }
-      items[i] = lastItem;
-      prio[i] = lastP;
-    }
-    return top;
-  }
+  return top;
 }

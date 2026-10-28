@@ -4,7 +4,8 @@ import {
   MAX_K,
   OFFER_TIMEOUT_MS,
   RETRY_MS,
-  RING_STEP_MS
+  RING_STEP_MS,
+  SEARCH_START_DELAY_MS
 } from '@/lib/sim/config';
 import { decide } from '@/lib/sim/drivers/llmBrain';
 import type { EventBus, OfferOutcome } from '@/lib/sim/events';
@@ -19,7 +20,7 @@ import {
   type Ride,
   type Route
 } from '@/lib/sim/types';
-import type { Driver } from '@/lib/sim/driver';
+import { followRoute, stopDriver, type Driver } from '@/lib/sim/driver';
 import { toCell } from '@/lib/sim/grid';
 import { fareFor } from '@/lib/sim/pricing';
 import type { World } from '@/lib/sim/world';
@@ -33,23 +34,27 @@ export interface Quote {
   etaMin: number | null;
 }
 
-export class Dispatcher {
-  ride: Ride | null = null;
-  private nextRideId = 1;
-  /** Driver currently holding the exclusive offer, if any. */
-  private offered: { ride: Ride; driver: Driver } | null = null;
-
-  constructor(
-    private world: World,
-    private bus: EventBus
-  ) {}
-
+/** Ring-search dispatch: quotes, exclusive offers, assignment and the trip. */
+export interface Dispatcher {
+  /** The rider's current request, or null. */
+  ride: Ride | null;
   /** Price and pickup ETA for every category, using a silent ring search (no offers). */
-  quote(pickup: Place, route: Route): Quote[] {
+  quote: (pickup: Place, route: Route) => Quote[];
+  request: (pickup: Place, category: Category, route: Route) => Ride;
+  cancel: () => void;
+}
+
+export function createDispatcher(world: World, bus: EventBus): Dispatcher {
+  let nextRideId = 1;
+  /** Driver currently holding the exclusive offer, if any. */
+  let offered: { ride: Ride; driver: Driver } | null = null;
+
+  const dispatcher: Dispatcher = { ride: null, quote, request, cancel };
+  function quote(pickup: Place, route: Route): Quote[] {
     const cell = toCell(pickup);
     const rings = gridDiskDistances(cell, MAX_K);
     return CATEGORY_LIST.map((category) => {
-      const hit = this.closestInRings(
+      const hit = closestInRings(
         rings,
         (d) => d.state === 'idle' && d.category === category,
         pickup
@@ -66,9 +71,9 @@ export class Dispatcher {
     });
   }
 
-  request(pickup: Place, category: Category, route: Route): Ride {
+  function request(pickup: Place, category: Category, route: Route): Ride {
     const ride: Ride = {
-      id: this.nextRideId++,
+      id: nextRideId++,
       pickup,
       pickupCell: toCell(pickup),
       category,
@@ -79,60 +84,60 @@ export class Dispatcher {
       driverId: null,
       requestedAt: performance.now()
     };
-    this.ride = ride;
-    this.bus.emit({ type: 'ride_requested', ride });
-    void this.run(ride);
+    dispatcher.ride = ride;
+    bus.emit({ type: 'ride_requested', ride });
+    void run(ride);
     return ride;
   }
 
-  cancel(): void {
-    const ride = this.ride;
+  function cancel(): void {
+    const ride = dispatcher.ride;
     if (!ride || ride.status === 'completed' || ride.status === 'cancelled')
       return;
     const prev = ride.status;
     ride.status = 'cancelled';
-    if (this.offered?.ride === ride) {
-      this.offered.driver.state = 'idle';
-      this.offered = null;
+    if (offered?.ride === ride) {
+      offered.driver.state = 'idle';
+      offered = null;
     }
     if (prev !== 'searching' && ride.driverId !== null) {
-      const d = this.world.drivers.get(ride.driverId);
+      const d = world.drivers.get(ride.driverId);
       if (d) {
-        d.stop();
+        stopDriver(d);
         d.state = 'idle';
       }
     }
-    this.bus.emit({ type: 'ride_cancelled', ride });
+    bus.emit({ type: 'ride_cancelled', ride });
   }
 
-  private closestInRings(
+  function closestInRings(
     rings: string[][],
     ok: (d: Driver) => boolean,
     origin: Place
   ): Driver | null {
     for (const ring of rings) {
-      const found = this.candidatesIn(ring, ok);
-      if (found.length) return this.closest(found, origin);
+      const found = candidatesIn(ring, ok);
+      if (found.length) return closest(found, origin);
     }
     return null;
   }
 
   /** The only place drivers are looked up: by cell, through the location index. */
-  private candidatesIn(cells: string[], ok: (d: Driver) => boolean): Driver[] {
-    return this.world.index
+  function candidatesIn(cells: string[], ok: (d: Driver) => boolean): Driver[] {
+    return world.index
       .driversInCells(cells)
-      .map((id) => this.world.drivers.get(id))
+      .map((id) => world.drivers.get(id))
       .filter((d): d is Driver => !!d && ok(d));
   }
 
-  private closest(ds: Driver[], origin: Place): Driver {
+  function closest(ds: Driver[], origin: Place): Driver {
     return ds.reduce((a, b) =>
       haversine(b.pos, origin) < haversine(a.pos, origin) ? b : a
     );
   }
 
   /** Walk outward ring by ring (k = 0, 1, 2 …) until a free driver of the right category shows up. */
-  private async searchRings(
+  async function searchRings(
     ride: Ride
   ): Promise<{ driver: Driver; k: number } | null> {
     const rings = gridDiskDistances(ride.pickupCell, MAX_K);
@@ -142,26 +147,27 @@ export class Dispatcher {
       !ride.declinedBy.has(d.id);
     for (let k = 0; k < rings.length; k++) {
       if (ride.status !== 'searching') return null;
-      const found = this.candidatesIn(rings[k], ok);
-      this.bus.emit({
+      const found = candidatesIn(rings[k], ok);
+      bus.emit({
         type: 'ring_searched',
         ride,
         k,
         cells: rings[k],
         found: found.length
       });
-      if (found.length) return { driver: this.closest(found, ride.pickup), k };
+      if (found.length) return { driver: closest(found, ride.pickup), k };
       await sleep(RING_STEP_MS);
     }
     return null;
   }
 
-  private async run(ride: Ride): Promise<void> {
+  async function run(ride: Ride): Promise<void> {
+    await sleep(SEARCH_START_DELAY_MS);
     while (ride.status === 'searching') {
-      const hit = await this.searchRings(ride);
+      const hit = await searchRings(ride);
       if (ride.status !== 'searching') return;
       if (!hit) {
-        this.bus.emit({ type: 'no_drivers', ride, category: ride.category });
+        bus.emit({ type: 'no_drivers', ride, category: ride.category });
         await sleep(RETRY_MS);
         // Everyone in range already passed — let them see it again.
         ride.declinedBy.clear();
@@ -171,9 +177,9 @@ export class Dispatcher {
       // Exclusive offer: the driver is locked while this request waits on them.
       const { driver, k } = hit;
       driver.state = 'offered';
-      this.offered = { ride, driver };
+      offered = { ride, driver };
       const startedAt = performance.now();
-      this.bus.emit({
+      bus.emit({
         type: 'offer_sent',
         ride,
         driver,
@@ -183,14 +189,14 @@ export class Dispatcher {
       });
 
       const result = await Promise.race<Decision | 'timeout'>([
-        decide(this.offerFor(ride, driver), driver),
+        decide(offerFor(ride, driver), driver),
         sleep(OFFER_TIMEOUT_MS).then(() => 'timeout' as const)
       ]);
       const afterMs = performance.now() - startedAt;
       if (ride.status !== 'searching') return; // cancel() already released the driver
-      this.offered = null;
+      offered = null;
       if (result !== 'timeout' && result.accept) {
-        this.bus.emit({
+        bus.emit({
           type: 'offer_result',
           ride,
           driver,
@@ -198,7 +204,7 @@ export class Dispatcher {
           reason: result.reason,
           afterMs
         });
-        await this.assign(ride, driver);
+        await assign(ride, driver);
         return;
       }
       driver.state = 'idle';
@@ -207,7 +213,7 @@ export class Dispatcher {
         result === 'timeout' ? 'timeout' : 'declined';
       const reason =
         result === 'timeout' ? "Didn't respond in 15 seconds." : result.reason;
-      this.bus.emit({
+      bus.emit({
         type: 'offer_result',
         ride,
         driver,
@@ -219,7 +225,7 @@ export class Dispatcher {
     }
   }
 
-  private offerFor(ride: Ride, driver: Driver): Offer {
+  function offerFor(ride: Ride, driver: Driver): Offer {
     return {
       rideId: ride.id,
       category: ride.category,
@@ -232,41 +238,44 @@ export class Dispatcher {
     };
   }
 
-  private async assign(ride: Ride, driver: Driver): Promise<void> {
+  async function assign(ride: Ride, driver: Driver): Promise<void> {
     driver.state = 'toPickup';
-    driver.stop();
+    stopDriver(driver);
     ride.driverId = driver.id;
     ride.status = 'driverEnRoute';
     const route = await fetchRoute(driver.pos, ride.pickup);
     if (ride.status !== 'driverEnRoute') return;
-    driver.follow(route.points, route.durationS, this.world.simTime, () =>
-      this.arrived(ride, driver)
+    followRoute(driver, route.points, route.durationS, world.simTime, () =>
+      arrived(ride, driver)
     );
-    this.bus.emit({ type: 'driver_assigned', ride, driver, route });
+    bus.emit({ type: 'driver_assigned', ride, driver, route });
   }
 
-  private async arrived(ride: Ride, driver: Driver): Promise<void> {
+  async function arrived(ride: Ride, driver: Driver): Promise<void> {
     if (ride.status !== 'driverEnRoute') return;
     ride.status = 'driverArrived';
-    this.bus.emit({ type: 'driver_arrived', ride, driver });
+    bus.emit({ type: 'driver_arrived', ride, driver });
     await sleep(2_500);
     if (ride.status !== 'driverArrived') return;
     ride.status = 'onTrip';
     driver.state = 'onTrip';
-    this.bus.emit({ type: 'picked_up', ride, driver });
-    driver.follow(
+    bus.emit({ type: 'picked_up', ride, driver });
+    followRoute(
+      driver,
       ride.route.points,
       ride.route.durationS,
-      this.world.simTime,
-      () => this.droppedOff(ride, driver)
+      world.simTime,
+      () => droppedOff(ride, driver)
     );
   }
 
-  private droppedOff(ride: Ride, driver: Driver): void {
+  function droppedOff(ride: Ride, driver: Driver): void {
     ride.status = 'completed';
     driver.state = 'idle';
     driver.trips++;
     driver.earnings += ride.fare * 0.75;
-    this.bus.emit({ type: 'dropped_off', ride, driver });
+    bus.emit({ type: 'dropped_off', ride, driver });
   }
+
+  return dispatcher;
 }
