@@ -4,7 +4,7 @@ import type { Driver } from '@/lib/sim/driver';
 import type { Ride } from '@/lib/sim/types';
 import Button from '@/components/atoms/Button';
 import DriverCard from '@/components/phone/DriverCard';
-import type { LiveTripProgress } from '@/components/phone/Phone';
+import type { LiveTripProgress } from '@/hooks/usePhone';
 
 interface EnRouteScreenProps {
   driver: Driver;

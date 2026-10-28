@@ -3,7 +3,7 @@ import { DESTINATION } from '@/lib/sim/config';
 import { LOCATIONS } from '@/lib/sim/data/locations';
 import { haversine } from '@/lib/sim/geo';
 import type { Place } from '@/lib/sim/types';
-import type { PhoneState } from '@/components/phone/Phone';
+import type { PhoneState } from '@/hooks/usePhone';
 
 interface PickupScreenProps extends Pick<PhoneState, 'places'> {
   onChoosePlace: (place: Place) => void;

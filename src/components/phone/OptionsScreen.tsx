@@ -4,7 +4,7 @@ import If from '@/lib/If';
 import { CATEGORIES, DESTINATION } from '@/lib/sim/config';
 import type { Quote } from '@/lib/sim/dispatch';
 import type { Category, Place, Route } from '@/lib/sim/types';
-import type { PhoneState } from '@/components/phone/Phone';
+import type { PhoneState } from '@/hooks/usePhone';
 import Button from '@/components/atoms/Button';
 
 const RIDE_EMOJI: Record<Category, string> = {

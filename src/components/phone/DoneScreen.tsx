@@ -5,7 +5,7 @@ import type { Driver } from '@/lib/sim/driver';
 import type { Ride } from '@/lib/sim/types';
 import Button from '@/components/atoms/Button';
 import DriverCard from '@/components/phone/DriverCard';
-import type { PhoneState } from '@/components/phone/Phone';
+import type { PhoneState } from '@/hooks/usePhone';
 
 const STAR_VALUES: number[] = [1, 2, 3, 4, 5];
 

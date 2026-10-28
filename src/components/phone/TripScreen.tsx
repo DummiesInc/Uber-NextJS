@@ -2,7 +2,7 @@ import If from '@/lib/If';
 import { DESTINATION } from '@/lib/sim/config';
 import type { Driver } from '@/lib/sim/driver';
 import DriverCard from '@/components/phone/DriverCard';
-import type { LiveTripProgress } from '@/components/phone/Phone';
+import type { LiveTripProgress } from '@/hooks/usePhone';
 
 interface TripScreenProps {
   driver: Driver;

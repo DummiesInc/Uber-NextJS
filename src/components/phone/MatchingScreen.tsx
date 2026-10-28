@@ -1,7 +1,7 @@
 import { Timer } from 'lucide-react';
 import If from '@/lib/If';
 import Button from '@/components/atoms/Button';
-import type { OfferLogEntry, PhoneState } from '@/components/phone/Phone';
+import type { OfferLogEntry, PhoneState } from '@/hooks/usePhone';
 import type { OfferOutcome } from '@/lib/sim/events';
 
 const OUTCOME_ICON: Record<OfferOutcome, string> = {
